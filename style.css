@@ -1,0 +1,375 @@
+/* ============================================================
+   Victoria Line Motion Lab — styles
+   Mobile-first, tuned for iPhone Safari (incl. standalone PWA).
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #050608;
+  --card-bg: #111318;
+  --border: #262833;
+  --text-main: #f5f7ff;
+  --text-muted: #a8adc2;   /* slightly brighter than before for contrast */
+
+  --accent: #0a84ff;       /* iOS system blue */
+  --danger: #ff453a;       /* iOS system red (recording) */
+
+  /* Series colours — keep in sync with SERIES constants in app.js */
+  --ax: #ff375f;
+  --ay: #32d74b;
+  --az: #64d2ff;
+  --alpha: #ffd60a;
+  --beta: #ff9f0a;
+  --gamma: #bf5af2;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Stop iOS Safari inflating text after rotation */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background-color: var(--bg); /* solid fallback behind the gradient */
+  background: radial-gradient(circle at top, #151827 0, #050608 55%) var(--bg);
+  color: var(--text-main);
+  /* Tame rubber-band scroll chaining in standalone mode */
+  overscroll-behavior-y: contain;
+}
+
+/* Shown only when JavaScript is disabled */
+.noscript-message {
+  margin: 0;
+  padding: 16px;
+  background: #3a1d1d;
+  color: #ffd7d7;
+  font-size: 15px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------
+   App shell — safe-area aware.
+   viewport-fit=cover lets us draw under the notch / status bar;
+   max(16px, env(...)) pads content back inside it. In a normal
+   browser tab the env() values are 0 and you just get 16px.
+   ------------------------------------------------------------ */
+.app-shell {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  padding-top: max(16px, env(safe-area-inset-top));
+  padding-right: max(16px, env(safe-area-inset-right));
+  padding-bottom: max(24px, env(safe-area-inset-bottom)); /* clear the home indicator */
+  padding-left: max(16px, env(safe-area-inset-left));
+}
+
+/* Header */
+
+.app-header h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 4px 0 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+/* Cards */
+
+.card {
+  background: var(--card-bg);
+  border-radius: 18px;
+  padding: 14px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+}
+
+/* Status card */
+
+.status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.status-value {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* Pulsing red dot while recording (class toggled by app.js) */
+.status-value.recording::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.85); }
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  /* Tabular figures stop the counters jittering as digits change */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------
+   Permission pill — the --pending / --granted / --denied
+   modifiers were referenced by app.js but missing from the
+   original CSS, so permission changes were invisible. Fixed.
+   ------------------------------------------------------------ */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 12px;
+  border-radius: 999px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: #161925;
+}
+
+/* Coloured state dot */
+.status-pill::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-pill--pending {
+  color: #ffd60a;
+  border-color: rgba(255, 214, 10, 0.35);
+  background: rgba(255, 214, 10, 0.08);
+}
+
+.status-pill--granted {
+  color: #32d74b;
+  border-color: rgba(50, 215, 75, 0.35);
+  background: rgba(50, 215, 75, 0.08);
+}
+
+.status-pill--denied {
+  color: #ff6961;
+  border-color: rgba(255, 69, 58, 0.4);
+  background: rgba(255, 69, 58, 0.1);
+}
+
+/* ------------------------------------------------------------
+   Buttons — 48px min height (above Apple's 44pt minimum),
+   16px text, visible pressed / disabled / focus states,
+   no grey iOS tap flash, no double-tap zoom, no long-press menu.
+   ------------------------------------------------------------ */
+
+.controls-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.btn {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-radius: 999px;
+  border: none;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  touch-action: manipulation;          /* removes double-tap-to-zoom delay */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;         /* no long-press callout */
+  -webkit-user-select: none;
+  user-select: none;
+  transition: transform 0.08s ease, opacity 0.15s ease, background-color 0.15s ease;
+}
+
+/* Press-down feedback */
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* Disabled buttons must look disabled */
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Keyboard / switch-control focus (doesn't flash on tap) */
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.btn-primary {
+  background: var(--accent);
+}
+
+.btn-secondary {
+  background: #1c1f2b;
+}
+
+/* Stop Recording state (toggled by app.js) */
+.btn-danger {
+  background: var(--danger);
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+/* Charts */
+
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chart-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Icon legend */
+
+.icon-legend {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.legend-item {
+  width: 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  opacity: 0.95;
+}
+
+.legend-item svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+/* Visible axis tag under each icon — the legend is no longer colour-only */
+.legend-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Apply to all legend shapes */
+.legend-item svg * {
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+.legend-item rect {
+  stroke-width: 1.6;
+}
+
+/* Z-axis arrows are filled triangles */
+.legend-item.az polygon {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* Series colours */
+.legend-item.ax    { color: var(--ax); }
+.legend-item.ay    { color: var(--ay); }
+.legend-item.az    { color: var(--az); }
+.legend-item.alpha { color: var(--alpha); }
+.legend-item.beta  { color: var(--beta); }
+.legend-item.gamma { color: var(--gamma); }
+
+/* Canvas */
+
+canvas {
+  display: block;          /* removes the inline-baseline gap below the canvas */
+  width: 100%;             /* JS reads this size; it never writes inline styles */
+  height: 220px;
+  border-radius: 12px;
+  background: #05060a;
+  border: 1px solid #1f2230;
+  touch-action: pan-y;     /* page still scrolls when a drag starts on a chart */
+}
+
+/* ------------------------------------------------------------
+   Landscape phones: shrink charts and widen the shell so both
+   charts remain usable in a ~375px-tall viewport.
+   ------------------------------------------------------------ */
+@media (orientation: landscape) and (max-height: 480px) {
+  .app-shell {
+    max-width: 720px;
+  }
+  canvas {
+    height: 150px;
+  }
+}
+
+/* Respect reduced-motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .btn {
+    transition: none;
+  }
+  .btn:active:not(:disabled) {
+    transform: none;
+  }
+  .status-value.recording::before {
+    animation: none; /* static red dot still indicates recording */
+  }
+}
