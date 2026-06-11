@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <!--
+    Viewport notes:
+    - viewport-fit=cover lets the app draw edge-to-edge on notched iPhones
+      (the CSS then pads content back in with env(safe-area-inset-*)).
+    - user-scalable=no was REMOVED: iOS ignores it since iOS 10 and it is an
+      accessibility violation. Double-tap zoom on controls is prevented with
+      `touch-action: manipulation` in the CSS instead.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+
+  <!-- Security: everything must come from this origin; no plugins, no <base> hijack -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+
+  <title>Victoria Line Motion Lab</title>
+  <meta name="description"
+        content="Record iPhone motion-sensor data (acceleration and rotation), watch it live on scrolling charts, and export sessions as JSON.">
+
+  <!-- PWA / iOS app-shell configuration -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#050608">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- black-translucent: page draws under the status bar; CSS safe-area padding compensates -->
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Motion Lab">
+  <!-- Stop iOS auto-linking numbers like "60 Hz" as phone numbers -->
+  <meta name="format-detection" content="telephone=no">
+
+  <!-- Add a 180x180 PNG named apple-touch-icon.png to the repo for a Home Screen icon.
+       Until then iOS falls back to a screenshot (a missing file here is harmless). -->
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+
+  <link rel="stylesheet" href="style.css">
+  <!-- defer: executes after the DOM is parsed, so app.js can query elements safely -->
+  <script src="app.js" defer></script>
+</head>
+
+<body>
+  <noscript>
+    <p class="noscript-message">
+      This app needs JavaScript to read the motion sensors. Enable JavaScript and reload.
+    </p>
+  </noscript>
+
+  <div class="app-shell">
+
+    <header class="app-header">
+      <h1>Victoria Line Motion Lab</h1>
+      <p class="subtitle">
+        Record iPhone motion data and visualise accelerations and rotations
+      </p>
+    </header>
+
+    <section class="card status-card" aria-label="Session status">
+      <div class="status-header">
+        <h2 class="status-title">Session status</h2>
+        <!-- aria-live announces state changes (Recording, Recorded, Saved…) to screen readers.
+             The fast-changing counters below deliberately do NOT announce. -->
+        <div id="sessionState" class="status-value" role="status" aria-live="polite">Idle</div>
+      </div>
+
+      <div class="status-body">
+        <div class="status-row">
+          <span>Total samples</span>
+          <span id="sampleCount">0</span>
+        </div>
+        <div class="status-row">
+          <span>Sample rate</span>
+          <span id="sampleRate">&mdash;</span>
+        </div>
+        <div class="status-row">
+          <span>Duration</span>
+          <span id="duration">0.0 s</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card controls-card" aria-label="Recording controls">
+      <div id="sensorStatus" class="status-pill status-pill--pending" role="status" aria-live="polite">
+        Motion permission: not requested
+      </div>
+
+      <div class="controls-row">
+        <button type="button" id="sensorBtn" class="btn btn-primary">
+          Enable Motion Sensors
+        </button>
+        <button type="button" id="recordBtn" class="btn btn-secondary" disabled>
+          Start Recording
+        </button>
+      </div>
+
+      <div class="controls-row">
+        <button type="button" id="saveBtn" class="btn btn-outline" disabled>
+          Save Recording
+        </button>
+        <button type="button" id="clearBtn" class="btn btn-outline" disabled>
+          Clear
+        </button>
+      </div>
+    </section>
+
+    <!-- ACCELERATION CHART -->
+    <section class="card chart-card" aria-label="Acceleration chart">
+      <div class="chart-header">
+        <h2 class="chart-title">Acceleration (g)</h2>
+
+        <div class="chart-legend icon-legend">
+
+          <!-- X (side-to-side) -->
+          <div class="legend-item ax" role="img" aria-label="X axis, side to side, red line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="18" y="6" width="4" height="28" rx="2"/>
+              <line x1="10" y1="20" x2="18" y2="20"/>
+              <line x1="30" y1="20" x2="22" y2="20"/>
+              <polyline points="12,18 10,20 12,22"/>
+              <polyline points="28,18 30,20 28,22"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">X</span>
+          </div>
+
+          <!-- Y (up/down) -->
+          <div class="legend-item ay" role="img" aria-label="Y axis, up and down, green line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="18" y="6" width="4" height="28" rx="2"/>
+              <line x1="20" y1="10" x2="20" y2="16"/>
+              <line x1="20" y1="30" x2="20" y2="24"/>
+              <polyline points="18,12 20,10 22,12"/>
+              <polyline points="18,28 20,30 22,28"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">Y</span>
+          </div>
+
+          <!-- Z (in/out of screen) -->
+          <div class="legend-item az" role="img" aria-label="Z axis, in and out of the screen, blue line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="19" y="8" width="2" height="24" rx="1"/>
+              <polygon points="20,6 17,12 23,12"/>
+              <polygon points="20,34 17,28 23,28"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">Z</span>
+          </div>
+
+        </div>
+      </div>
+
+      <canvas id="accelChart" role="img"
+              aria-label="Live chart of X, Y and Z acceleration in g over the last 8 seconds">
+        Live acceleration chart (your browser does not support canvas).
+      </canvas>
+    </section>
+
+    <!-- ROTATION CHART -->
+    <section class="card chart-card" aria-label="Rotation chart">
+      <div class="chart-header">
+        <h2 class="chart-title">Rotation (&deg;/s)</h2>
+
+        <div class="chart-legend icon-legend">
+
+          <!-- ALPHA (twist about Z) -->
+          <div class="legend-item alpha" role="img" aria-label="Alpha, twist, yellow line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="18" y="6" width="4" height="28" rx="2"/>
+              <path d="M12 20a8 8 0 0 1 16 0"/>
+              <polyline points="24,16 28,18 24,20"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">&alpha;</span>
+          </div>
+
+          <!-- BETA (tilt about X) -->
+          <div class="legend-item beta" role="img" aria-label="Beta, tilt, orange line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="18" y="6" width="4" height="28" rx="2"/>
+              <polyline points="14,14 20,8 26,14"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">&beta;</span>
+          </div>
+
+          <!-- GAMMA (roll about Y) -->
+          <div class="legend-item gamma" role="img" aria-label="Gamma, roll, purple line">
+            <svg viewBox="0 0 40 40" aria-hidden="true" focusable="false">
+              <rect x="18" y="6" width="4" height="28" rx="2"/>
+              <path d="M14 16Q20 10 26 16"/>
+            </svg>
+            <span class="legend-label" aria-hidden="true">&gamma;</span>
+          </div>
+
+        </div>
+      </div>
+
+      <canvas id="gyroChart" role="img"
+              aria-label="Live chart of alpha, beta and gamma rotation rate in degrees per second over the last 8 seconds">
+        Live rotation chart (your browser does not support canvas).
+      </canvas>
+    </section>
+
+  </div>
+</body>
+</html>
