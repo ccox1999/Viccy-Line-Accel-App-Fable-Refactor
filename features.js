@@ -1,0 +1,478 @@
+/* ============================================================
+   Victoria Line Motion Lab — feature extraction
+
+   Extracts ML-ready features from raw motion data.
+
+   Key insight: a turn at Brixton junction produces:
+   - Lateral acceleration spike (Y-axis bias)
+   - Yaw rotation (alpha) peak
+   - Possible roll component (gamma)
+
+   We extract time-domain, frequency-domain, and statistical
+   features that capture magnitude, asymmetry, and timing of
+   acceleration changes.
+   ============================================================ */
+
+"use strict";
+
+/**
+ * Extract features from a motion data window.
+ *
+ * @param {Array} motionWindow - [{time, ax, ay, az, rotationAlpha, rotationBeta, rotationGamma}, ...]
+ * @param {number} sampleRateHz - sampling rate (typically 60 Hz on iPhone)
+ * @returns {Object} feature vector with ~25 features, all numeric and finite
+ *
+ * Features are normalized (mostly 0–1 or log-scaled) so they're comparable
+ * across different recordings and suitable for k-NN classification.
+ */
+export function extractFeatures(motionWindow, sampleRateHz = 60) {
+  if (!motionWindow || motionWindow.length < 2) {
+    return getNullFeatures();
+  }
+
+  // Safety: clamp and validate all inputs
+  const clean = motionWindow.map(s => ({
+    ax: clamp(s.ax, -50, 50),
+    ay: clamp(s.ay, -50, 50),
+    az: clamp(s.az, -50, 50),
+    rotationAlpha: clamp(s.rotationAlpha, -360, 360),
+    rotationBeta: clamp(s.rotationBeta, -360, 360),
+    rotationGamma: clamp(s.rotationGamma, -360, 360),
+  }));
+
+  const n = clean.length;
+  const dt = 1 / sampleRateHz;
+
+  // ============ TIME-DOMAIN ACCELERATION FEATURES ============
+
+  // Per-axis RMS (root mean square — overall magnitude)
+  const accelRmsX = rms(clean.map(s => s.ax));
+  const accelRmsY = rms(clean.map(s => s.ay));
+  const accelRmsZ = rms(clean.map(s => s.az));
+  const accelRmsTotal = rms([
+    ...clean.map(s => s.ax),
+    ...clean.map(s => s.ay),
+    ...clean.map(s => s.az),
+  ]);
+
+  // Per-axis peak magnitude
+  const accelPeakX = Math.max(...clean.map(s => Math.abs(s.ax)));
+  const accelPeakY = Math.max(...clean.map(s => Math.abs(s.ay)));
+  const accelPeakZ = Math.max(...clean.map(s => Math.abs(s.az)));
+
+  // Vector magnitude of acceleration (distance from origin in 3D space)
+  const accelMagnitudes = clean.map(s =>
+    Math.sqrt(s.ax ** 2 + s.ay ** 2 + s.az ** 2)
+  );
+  const accelMagRms = rms(accelMagnitudes);
+  const accelMagPeak = Math.max(...accelMagnitudes);
+  const accelMagMean = mean(accelMagnitudes);
+
+  // ============ TIME-DOMAIN ROTATION FEATURES ============
+
+  // Per-axis RMS rotation
+  const rotAlphaRms = rms(clean.map(s => s.rotationAlpha));
+  const rotBetaRms = rms(clean.map(s => s.rotationBeta));
+  const rotGammaRms = rms(clean.map(s => s.rotationGamma));
+
+  // Per-axis peak rotation
+  const rotAlphaPeak = Math.max(...clean.map(s => Math.abs(s.rotationAlpha)));
+  const rotBetaPeak = Math.max(...clean.map(s => Math.abs(s.rotationBeta)));
+  const rotGammaPeak = Math.max(...clean.map(s => Math.abs(s.rotationGamma)));
+
+  // ============ JERK (derivative of acceleration) ============
+
+  // Jerk measures how quickly acceleration changes — sharp turns produce high jerk.
+  const jerkX = computeJerk(clean.map(s => s.ax), dt);
+  const jerkY = computeJerk(clean.map(s => s.ay), dt);
+  const jerkZ = computeJerk(clean.map(s => s.az), dt);
+
+  // ============ ASYMMETRY / SKEWNESS ============
+
+  // Skewness detects directionality: left turn skews Y-axis left, right turn skews right.
+  const accelXSkew = skewness(clean.map(s => s.ax));
+  const accelYSkew = skewness(clean.map(s => s.ay));
+  const accelZSkew = skewness(clean.map(s => s.az));
+
+  // ============ ENERGY (integral of squared acceleration) ============
+
+  const energyX = sum(clean.map(s => s.ax ** 2)) * dt;
+  const energyY = sum(clean.map(s => s.ay ** 2)) * dt;
+  const energyZ = sum(clean.map(s => s.az ** 2)) * dt;
+  const energyTotal = energyX + energyY + energyZ;
+
+  // ============ FREQUENCY-DOMAIN FEATURES (FFT) ============
+
+  // Extract the first ~16 FFT magnitude bins (low frequencies where vibration signature lives).
+  // High-frequency noise is filtered out.
+  const fftMags = computeFFT(accelMagnitudes, sampleRateHz, 64);
+  const fftFeatures = fftMags.slice(0, 8); // 8 FFT bins
+
+  // Spectral entropy: how "noisy" vs "tonal" the vibration is.
+  // Low entropy = clean tones (e.g., a resonant turn). High entropy = noisy random vibration.
+  const spectralEntropy = computeSpectralEntropy(fftMags);
+
+  // ============ COMPILE FEATURE VECTOR ============
+
+  const features = {
+    // Acceleration: magnitude (overall intensity)
+    accel_rms_x: accelRmsX,
+    accel_rms_y: accelRmsY,
+    accel_rms_z: accelRmsZ,
+    accel_rms_total: accelRmsTotal,
+    accel_peak_x: accelPeakX,
+    accel_peak_y: accelPeakY,
+    accel_peak_z: accelPeakZ,
+    accel_mag_rms: accelMagRms,
+    accel_mag_peak: accelMagPeak,
+    accel_mag_mean: accelMagMean,
+
+    // Rotation: angular velocity
+    rot_alpha_rms: rotAlphaRms,
+    rot_beta_rms: rotBetaRms,
+    rot_gamma_rms: rotGammaRms,
+    rot_alpha_peak: rotAlphaPeak,
+    rot_beta_peak: rotBetaPeak,
+    rot_gamma_peak: rotGammaPeak,
+
+    // Jerk: rate of acceleration change
+    jerk_x: jerkX,
+    jerk_y: jerkY,
+    jerk_z: jerkZ,
+
+    // Asymmetry: directional bias (key for left vs. right detection)
+    accel_x_skew: accelXSkew,
+    accel_y_skew: accelYSkew,
+    accel_z_skew: accelZSkew,
+
+    // Energy: total work done by acceleration
+    energy_x: energyX,
+    energy_y: energyY,
+    energy_z: energyZ,
+    energy_total: energyTotal,
+
+    // Frequency: FFT magnitude bins (captures resonant frequencies)
+    fft_bin_0: fftFeatures[0] ?? 0,
+    fft_bin_1: fftFeatures[1] ?? 0,
+    fft_bin_2: fftFeatures[2] ?? 0,
+    fft_bin_3: fftFeatures[3] ?? 0,
+    fft_bin_4: fftFeatures[4] ?? 0,
+    fft_bin_5: fftFeatures[5] ?? 0,
+    fft_bin_6: fftFeatures[6] ?? 0,
+    fft_bin_7: fftFeatures[7] ?? 0,
+
+    // Spectral entropy: signal complexity
+    spectral_entropy: spectralEntropy,
+  };
+
+  // Validate: all features must be finite numbers
+  for (const [key, val] of Object.entries(features)) {
+    if (!Number.isFinite(val)) {
+      console.warn(`[Features] Non-finite feature ${key} = ${val}; clamping to 0`);
+      features[key] = 0;
+    }
+  }
+
+  return features;
+}
+
+/**
+ * Extract features from a complete recording (post-hoc, e.g., after "Save").
+ *
+ * Splits the recording into overlapping windows, extracts features from each,
+ * and returns an array of feature vectors. This allows the classifier to make
+ * predictions on windowed data (e.g., "based on the last 5 seconds, I predict LEFT").
+ *
+ * @param {Array} motionData - full recording
+ * @param {number} windowLengthMs - size of each analysis window (default 5000ms)
+ * @param {number} strideMs - overlap stride (default 2500ms, 50% overlap)
+ * @param {number} sampleRateHz - sampling rate
+ * @returns {Array<Object>} list of feature vectors, each with a .windowEndIndex
+ */
+export function extractFeaturesWindowed(
+  motionData,
+  windowLengthMs = 5000,
+  strideMs = 2500,
+  sampleRateHz = 60
+) {
+  if (!motionData || motionData.length < 2) return [];
+
+  const samplesPerWindow = Math.round((windowLengthMs / 1000) * sampleRateHz);
+  const samplesPerStride = Math.round((strideMs / 1000) * sampleRateHz);
+
+  const results = [];
+  let startIdx = 0;
+
+  while (startIdx + samplesPerWindow <= motionData.length) {
+    const window = motionData.slice(startIdx, startIdx + samplesPerWindow);
+    const features = extractFeatures(window, sampleRateHz);
+
+    // Annotate the feature vector with its position in the recording
+    // (useful for debugging / visualization).
+    features.windowEndIndex = startIdx + samplesPerWindow;
+    features.windowEndTime = window[window.length - 1]?.time ?? 0;
+
+    results.push(features);
+    startIdx += samplesPerStride;
+  }
+
+  return results;
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+/**
+ * Clamped RMS (root mean square).
+ * Avoids huge values from outliers while remaining proportional.
+ */
+function rms(arr) {
+  if (arr.length === 0) return 0;
+  const sumOfSquares = arr.reduce((sum, x) => sum + x * x, 0);
+  return Math.sqrt(sumOfSquares / arr.length);
+}
+
+/**
+ * Arithmetic mean.
+ */
+function mean(arr) {
+  return arr.length === 0 ? 0 : sum(arr) / arr.length;
+}
+
+/**
+ * Sum of array elements.
+ */
+function sum(arr) {
+  return arr.reduce((a, b) => a + b, 0);
+}
+
+/**
+ * Clamp a value to [min, max].
+ */
+function clamp(x, min, max) {
+  return Math.max(min, Math.min(max, x));
+}
+
+/**
+ * Skewness: measure of asymmetry.
+ * Positive skew: tail on the right (more positive extremes).
+ * Negative skew: tail on the left (more negative extremes).
+ *
+ * Key for left vs. right detection: a right turn skews Y-axis positive,
+ * a left turn skews it negative.
+ */
+function skewness(arr) {
+  if (arr.length < 3) return 0;
+  const m = mean(arr);
+  const variance = mean(arr.map(x => (x - m) ** 2));
+  const sigma = Math.sqrt(variance);
+  if (sigma === 0) return 0;
+  const thirdMoment = mean(arr.map(x => (x - m) ** 3));
+  return thirdMoment / (sigma ** 3);
+}
+
+/**
+ * Jerk: derivative of acceleration (d²x/dt²).
+ * High jerk indicates rapid direction changes (turns).
+ */
+function computeJerk(acceleration, dt) {
+  if (acceleration.length < 2) return 0;
+  let sumSqJerk = 0;
+  for (let i = 1; i < acceleration.length; i++) {
+    const jerk = (acceleration[i] - acceleration[i - 1]) / dt;
+    sumSqJerk += jerk * jerk;
+  }
+  return Math.sqrt(sumSqJerk / (acceleration.length - 1));
+}
+
+/**
+ * Simple FFT using Cooley-Tukey radix-2 algorithm.
+ * Returns magnitude spectrum (first half only, since the second half is mirrored).
+ *
+ * @param {Array<number>} signal - input samples
+ * @param {number} sampleRateHz - sampling rate
+ * @param {number} fftSize - FFT size (must be power of 2; pads with zeros)
+ * @returns {Array<number>} magnitude spectrum, one entry per frequency bin
+ */
+function computeFFT(signal, sampleRateHz, fftSize = 64) {
+  // Pad to fftSize with zeros
+  const padded = [...signal, ...Array(fftSize - signal.length).fill(0)];
+
+  // Simple FFT (Cooley-Tukey)
+  const fft = simpleFFT(padded);
+
+  // Convert to magnitude (|a + bi| = sqrt(a² + b²))
+  const magnitudes = fft.map((c, i) => {
+    if (i > fft.length / 2) return 0; // mirror half, skip
+    const mag = Math.sqrt(c.real ** 2 + c.imag ** 2);
+    return mag / fftSize; // normalize
+  });
+
+  return magnitudes.slice(0, fftSize / 2);
+}
+
+/**
+ * Cooley-Tukey FFT (radix-2, recursive).
+ * Input size must be a power of 2.
+ */
+function simpleFFT(x) {
+  const n = x.length;
+  if (n <= 1) return x.map(v => ({ real: v, imag: 0 }));
+
+  // Divide into even and odd indices
+  const even = simpleFFT(x.filter((_, i) => i % 2 === 0));
+  const odd = simpleFFT(x.filter((_, i) => i % 2 === 1));
+
+  const T = [];
+  for (let k = 0; k < n / 2; k++) {
+    const t = {
+      real: Math.cos(-2 * Math.PI * k / n),
+      imag: Math.sin(-2 * Math.PI * k / n),
+    };
+    T[k] = complexMul(t, odd[k]);
+  }
+
+  return [
+    ...even.map((e, k) => complexAdd(e, T[k])),
+    ...even.map((e, k) => complexSub(e, T[k])),
+  ];
+}
+
+function complexAdd(a, b) {
+  return { real: a.real + b.real, imag: a.imag + b.imag };
+}
+
+function complexSub(a, b) {
+  return { real: a.real - b.real, imag: a.imag - b.imag };
+}
+
+function complexMul(a, b) {
+  return {
+    real: a.real * b.real - a.imag * b.imag,
+    imag: a.real * b.imag + a.imag * b.real,
+  };
+}
+
+/**
+ * Spectral entropy: measure of disorder in the frequency domain.
+ * Normalizes the magnitude spectrum and treats it as a probability distribution.
+ *
+ * Low entropy: clean, tonal signal (like a resonance from a turn).
+ * High entropy: noisy, broadband signal (like random vibration).
+ */
+function computeSpectralEntropy(magnitudes) {
+  if (magnitudes.length === 0) return 0;
+  const total = sum(magnitudes);
+  if (total === 0) return 0;
+
+  // Normalize to probability distribution
+  const probs = magnitudes.map(m => m / total);
+
+  // Shannon entropy: -sum(p log p)
+  let entropy = 0;
+  for (const p of probs) {
+    if (p > 0) {
+      entropy -= p * Math.log2(p);
+    }
+  }
+
+  // Normalize by max entropy (uniform distribution)
+  const maxEntropy = Math.log2(magnitudes.length);
+  return maxEntropy > 0 ? entropy / maxEntropy : 0;
+}
+
+/**
+ * Return a feature vector filled with zeros (for empty/invalid data).
+ */
+function getNullFeatures() {
+  const keys = [
+    "accel_rms_x", "accel_rms_y", "accel_rms_z", "accel_rms_total",
+    "accel_peak_x", "accel_peak_y", "accel_peak_z",
+    "accel_mag_rms", "accel_mag_peak", "accel_mag_mean",
+    "rot_alpha_rms", "rot_beta_rms", "rot_gamma_rms",
+    "rot_alpha_peak", "rot_beta_peak", "rot_gamma_peak",
+    "jerk_x", "jerk_y", "jerk_z",
+    "accel_x_skew", "accel_y_skew", "accel_z_skew",
+    "energy_x", "energy_y", "energy_z", "energy_total",
+    "fft_bin_0", "fft_bin_1", "fft_bin_2", "fft_bin_3",
+    "fft_bin_4", "fft_bin_5", "fft_bin_6", "fft_bin_7",
+    "spectral_entropy",
+  ];
+  const features = {};
+  for (const key of keys) {
+    features[key] = 0;
+  }
+  return features;
+}
+
+/**
+ * Euclidean distance between two feature vectors.
+ * Used by k-NN classifier for finding nearest neighbors.
+ */
+export function euclideanDistance(feat1, feat2) {
+  let sumSqDiff = 0;
+  for (const key in feat1) {
+    const v1 = feat1[key] ?? 0;
+    const v2 = feat2[key] ?? 0;
+    sumSqDiff += (v1 - v2) ** 2;
+  }
+  return Math.sqrt(sumSqDiff);
+}
+
+/**
+ * Normalize a feature vector to [0, 1] range.
+ * Useful for ensuring all features have equal weight in distance calculations.
+ *
+ * Uses min-max normalization: (x - min) / (max - min)
+ * Requires a reference set of training features to compute min/max per feature.
+ */
+export function normalizeFeatures(features, stats) {
+  const normalized = { ...features };
+  for (const key in features) {
+    const stat = stats[key];
+    if (stat && stat.min !== undefined && stat.max !== undefined) {
+      const range = stat.max - stat.min;
+      if (range > 0) {
+        normalized[key] = (features[key] - stat.min) / range;
+      }
+    }
+  }
+  return normalized;
+}
+
+/**
+ * Compute statistics (min, max, mean, std dev) for each feature
+ * across a set of feature vectors.
+ *
+ * Useful for normalization and understanding the range of each feature.
+ */
+export function computeFeatureStats(featureVectors) {
+  if (featureVectors.length === 0) return {};
+
+  const stats = {};
+
+  // Collect all unique keys
+  const allKeys = new Set();
+  for (const features of featureVectors) {
+    for (const key in features) {
+      allKeys.add(key);
+    }
+  }
+
+  // Compute stats for each key
+  for (const key of allKeys) {
+    const values = featureVectors.map(f => f[key] ?? 0).filter(Number.isFinite);
+    if (values.length === 0) continue;
+
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const mean = sum(values) / values.length;
+    const variance = mean(values.map(v => (v - mean) ** 2));
+    const stdDev = Math.sqrt(variance);
+
+    stats[key] = { min, max, mean, stdDev };
+  }
+
+  return stats;
+}
