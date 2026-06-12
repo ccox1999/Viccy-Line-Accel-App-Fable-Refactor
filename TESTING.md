@@ -25,49 +25,13 @@ Both Phase 1 and Phase 2 are now integrated and ready to test. Here's how to val
 
 ### Setup (once)
 
-1. **Generate fake training data** for testing (quick, doesn't require real trips):
+1. **Tap the "🧪 Test Data" button** in the app's controls section.
+   It generates 10 fake training examples (5 left, 5 right) — no console needed.
 
-   Open browser DevTools console and paste:
-   ```javascript
-   // Create 10 fake training examples (5 left, 5 right)
-   (async () => {
-     const { features } = await import('./features.js');
-     const { TrainingSet } = await import('./training-set.js');
-     
-     const trainSet = new TrainingSet();
-     await trainSet.load();
-     
-     // Generate fake motion data (random noise)
-     const fakeMotion = Array(3000).fill(0).map(() => ({
-       time: performance.now() + Math.random() * 100,
-       ax: (Math.random() - 0.5) * 2,
-       ay: (Math.random() - 0.5) * 2,
-       az: (Math.random() - 0.5) * 2,
-       rotationAlpha: (Math.random() - 0.5) * 100,
-       rotationBeta: (Math.random() - 0.5) * 100,
-       rotationGamma: (Math.random() - 0.5) * 100,
-     }));
-     
-     // Add examples
-     for (let i = 0; i < 5; i++) {
-       const leftMotion = fakeMotion.map(s => ({...s, ay: s.ay - 0.3})); // left bias
-       trainSet.add(leftMotion, 'left', { notes: `Fake left ${i}` });
-     }
-     
-     for (let i = 0; i < 5; i++) {
-       const rightMotion = fakeMotion.map(s => ({...s, ay: s.ay + 0.3})); // right bias
-       trainSet.add(rightMotion, 'right', { notes: `Fake right ${i}` });
-     }
-     
-     await trainSet.save();
-     console.log('Created 10 fake training examples');
-   })();
-   ```
-
-2. **Reload the page**. You should see:
-   - "🏷️ Label & Train" button enabled
-   - "🔮 Predict Platform" button enabled
+2. You should see:
+   - An alert confirming the examples were created
    - Training status: `Training data: 5L / 5R ✓ Ready to predict`
+   - "🏷️ Label & Train" and "🔮 Predict Platform" enabled once a recording exists
 
 ### Test Steps
 
@@ -236,8 +200,9 @@ Both Phase 1 and Phase 2 are now integrated and ready to test. Here's how to val
 **Issue: Training data disappears after reload**
 - Check DevTools → Application → Local Storage
 - Should see key: `victoria-line-training-set`
-- If missing, check IndexedDB instead
 - Check DevTools → Console for storage errors
+- Note: training data is stored per-origin — a different URL (or
+  incognito window) starts with an empty set
 
 ---
 

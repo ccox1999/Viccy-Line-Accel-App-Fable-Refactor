@@ -36,6 +36,8 @@
   <!-- Add a 180x180 PNG named apple-touch-icon.png to the repo for a Home Screen icon.
        Until then iOS falls back to a screenshot (a missing file here is harmless). -->
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <!-- Also serves as the favicon (stops the /favicon.ico 404 in console) -->
+  <link rel="icon" type="image/png" href="icon-192.png">
 
   <link rel="stylesheet" href="style.css">
   <!-- defer: executes after the DOM is parsed, so app.js can query elements safely -->
@@ -122,18 +124,18 @@
         </button>
       </div>
 
-      <div id="trainingStatus" class="training-status-text" style="display: none; margin-top: 8px; padding: 8px; background: #1a1f2e; border-radius: 8px; font-size: 13px; color: #a8adc2;"></div>
+      <div id="trainingStatus" class="training-status-text hidden"></div>
     </section>
 
     <!-- Live Platform Forecast (shown during recording) -->
-    <section id="liveForcastCard" class="card chart-card" aria-label="Live platform forecast" style="display: none;">
+    <section id="liveForcastCard" class="card chart-card hidden" aria-label="Live platform forecast">
       <div class="chart-header">
         <h2 class="chart-title">Live Platform Forecast</h2>
       </div>
-      <div style="padding: 16px; text-align: center;">
-        <div id="forecastPlatform" style="font-size: 32px; font-weight: bold; margin: 8px 0;">—</div>
-        <div id="forecastConfidence" style="font-size: 14px; color: #a8adc2;">Confidence: —</div>
-        <div id="forecastNote" style="font-size: 12px; color: #6b7280; margin-top: 8px;">Waiting for data…</div>
+      <div class="forecast-body">
+        <div id="forecastPlatform" class="forecast-platform">&mdash;</div>
+        <div id="forecastConfidence" class="forecast-confidence">Confidence: &mdash;</div>
+        <div id="forecastNote" class="forecast-note">Waiting for data&hellip;</div>
       </div>
     </section>
 

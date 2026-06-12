@@ -136,7 +136,8 @@ async function loadMLModules() {
 
     // ML state (Phase 1 & 2)
     trainSet: null,           // TrainingSet instance (loaded on init)
-    classifier: null,         // KNNClassifier instance (rebuilt each prediction)
+    classifier: null,         // cached KNNClassifier (Phase 2 live predictions)
+    classifierBuiltFor: -1,   // trainSet.count() the cached classifier was built from
     lastPredictionAt: 0,      // timestamp of last live prediction (Phase 2)
     lastLivePrediction: null, // { label, confidence, neighbors } from Phase 2
   };
@@ -243,6 +244,36 @@ async function loadMLModules() {
   // ---------- ML Platform Prediction (Phase 1 & 2) -------------------------
 
   /**
+   * Get the (lazily created) training set, loading any persisted examples.
+   */
+  async function ensureTrainSet() {
+    if (!state.trainSet) {
+      const ml = await loadMLModules();
+      state.trainSet = new ml.trainingSet.TrainingSet();
+      await state.trainSet.load();
+    }
+    return state.trainSet;
+  }
+
+  /**
+   * Build a fresh classifier from the current training set.
+   * Examples without a feature vector (old-format imports) are skipped.
+   */
+  async function buildClassifier() {
+    const ml = await loadMLModules();
+    const trainSet = await ensureTrainSet();
+    const clf = new ml.classifier.KNNClassifier(5);
+    for (const ex of trainSet.examples) {
+      if (!ex.features || typeof ex.features !== "object") continue;
+      clf.addTrainingExample(ex.features, ex.label, {
+        recordingId: ex.recordingId,
+        timestamp: ex.timestamp,
+      });
+    }
+    return clf;
+  }
+
+  /**
    * Generate fake training data for testing (10 examples: 5 left, 5 right).
    * Useful for validating Phase 1 & 2 without needing real motion data.
    */
@@ -250,12 +281,8 @@ async function loadMLModules() {
     try {
       ui.generateTestDataBtn.disabled = true;
 
-      if (!state.trainSet) {
-        state.trainSet = new (await loadMLModules()).trainingSet.TrainingSet();
-        await state.trainSet.load();
-      }
-
       const ml = await loadMLModules();
+      await ensureTrainSet();
 
       // Generate fake motion data (random noise)
       const fakeMotion = Array(3000)
@@ -317,7 +344,7 @@ async function loadMLModules() {
       isReadyForTraining ? " ✓ Ready to predict" : " (need 5+ of each)"
     }`;
     ui.trainingStatus.textContent = text;
-    ui.trainingStatus.style.display = "block";
+    ui.trainingStatus.classList.remove("hidden");
 
     // Enable predict/label buttons only if we have training data
     ui.predictBtn.disabled = !isReadyForTraining || state.data.length === 0;
@@ -347,28 +374,22 @@ async function loadMLModules() {
       // Extract features
       const features = ml.features.extractFeatures(window, 60);
 
-      // Build classifier from training set (lightweight, done each prediction)
-      if (!state.classifier) {
-        state.classifier = new ml.classifier.KNNClassifier(5);
-      }
-
-      // Rebuild classifier with current training data (ensures fresh examples)
-      state.classifier.clear();
-      for (const ex of state.trainSet.examples) {
-        state.classifier.addTrainingExample(ex.features, ex.label, {
-          recordingId: ex.recordingId,
-        });
+      // Build the classifier once per recording; rebuild only if the
+      // training set has changed since (labelling happens between trips).
+      if (!state.classifier || state.classifierBuiltFor !== state.trainSet.count()) {
+        state.classifier = await buildClassifier();
+        state.classifierBuiltFor = state.trainSet.count();
       }
 
       // Predict
       const prediction = state.classifier.predict(features);
+      if (!prediction.label) return; // no usable training examples
       state.lastLivePrediction = prediction;
 
-      // Update UI
-      const platformColor =
-        prediction.label === "left" ? "#ff375f" : "#32d74b";
+      // Update UI (colour via class — the CSP forbids style attributes)
       ui.forecastPlatform.textContent = prediction.label.toUpperCase();
-      ui.forecastPlatform.style.color = platformColor;
+      ui.forecastPlatform.classList.toggle("platform-left", prediction.label === "left");
+      ui.forecastPlatform.classList.toggle("platform-right", prediction.label === "right");
       ui.forecastConfidence.textContent = `Confidence: ${(
         prediction.confidence * 100
       ).toFixed(0)}%`;
@@ -403,16 +424,13 @@ async function loadMLModules() {
       // Extract features
       const features = ml.features.extractFeatures(state.data, 60);
 
-      // Build classifier
-      const clf = new ml.classifier.KNNClassifier(5);
-      for (const ex of state.trainSet.examples) {
-        clf.addTrainingExample(ex.features, ex.label, {
-          recordingId: ex.recordingId,
-        });
-      }
-
-      // Predict
+      // Build classifier and predict
+      const clf = await buildClassifier();
       const prediction = clf.predict(features);
+      if (!prediction.label) {
+        alert("No usable training examples found — add some labeled trips first.");
+        return;
+      }
 
       // Show result in a card
       const resultCard = document.createElement("div");
@@ -427,9 +445,8 @@ async function loadMLModules() {
       body.className = "prediction-body";
 
       const platformDiv = document.createElement("div");
-      platformDiv.className = "prediction-platform";
+      platformDiv.className = `prediction-platform platform-${prediction.label}`;
       platformDiv.textContent = prediction.label.toUpperCase();
-      platformDiv.style.color = prediction.label === "left" ? "#ff375f" : "#32d74b";
       body.appendChild(platformDiv);
 
       const confDiv = document.createElement("div");
@@ -516,21 +533,15 @@ async function loadMLModules() {
     try {
       ui.labelBtn.disabled = true;
 
-      if (!state.trainSet) {
-        state.trainSet = new (await loadMLModules()).trainingSet.TrainingSet();
-        await state.trainSet.load();
-      }
-
       const ml = await loadMLModules();
+      await ensureTrainSet();
 
       // Extract features from the recording (lightweight storage)
       const features = ml.features.extractFeatures(state.data, 60);
 
       // Add features (not raw motion data) to training set
       state.trainSet.add(features, label, {
-        recordingId: `recording-${Date.now()}-${Math.random()
-          .toString(36)
-          .substr(2, 9)}`,
+        recordingId: ml.trainingSet.generateRecordingId(),
         timestamp: Date.now(),
         notes: `User-labeled ${label} platform`,
       });
@@ -860,9 +871,10 @@ async function loadMLModules() {
     ui.predictBtn.disabled = true;
     ui.labelBtn.disabled = true;
 
-    // Show live forecast card (Phase 2)
-    ui.liveForcastCard.style.display = "block";
+    // Show live forecast card (Phase 2), reset to its waiting state
+    ui.liveForcastCard.classList.remove("hidden");
     ui.forecastPlatform.textContent = "\u2014";
+    ui.forecastPlatform.classList.remove("platform-left", "platform-right");
     ui.forecastConfidence.textContent = "Confidence: \u2014";
     ui.forecastNote.textContent = "Waiting for data\u2026";
 
@@ -886,7 +898,7 @@ async function loadMLModules() {
     ui.sessionState.classList.remove("recording");
 
     // Hide live forecast card (Phase 2)
-    ui.liveForcastCard.style.display = "none";
+    ui.liveForcastCard.classList.add("hidden");
 
     const hasData = state.data.length > 0;
     state.unsaved = hasData;
@@ -901,20 +913,12 @@ async function loadMLModules() {
     updateSessionInfo();
     scheduleRender();
 
-    // Offer to label the recording for training (Phase 1)
+    // Offer to label the recording for training. The modal has its own
+    // Skip button (and tap-outside-to-skip), so no extra confirm needed.
     if (hasData && state.trainSet) {
-      const shouldLabel = await new Promise((resolve) => {
-        const confirmLabel = window.confirm(
-          "Label this trip to add to your training set? (OK = yes, Cancel = skip)"
-        );
-        resolve(confirmLabel);
-      });
-
-      if (shouldLabel) {
-        const label = await showLabelingDialog();
-        if (label && label !== "skip") {
-          await labelAndSaveToTrainingSet(label);
-        }
+      const label = await showLabelingDialog();
+      if (label && label !== "skip") {
+        await labelAndSaveToTrainingSet(label);
       }
     }
   }
@@ -1079,9 +1083,7 @@ async function loadMLModules() {
 
     // Load training set asynchronously (Phase 1 & 2)
     try {
-      const ml = await loadMLModules();
-      state.trainSet = new ml.trainingSet.TrainingSet();
-      await state.trainSet.load();
+      await ensureTrainSet();
       console.log(
         `[ML] Loaded training set: ${state.trainSet.count()} examples`
       );

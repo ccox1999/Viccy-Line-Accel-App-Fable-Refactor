@@ -263,12 +263,55 @@ body {
   border: 1px solid var(--border);
 }
 
+/* Utility: hide an element. The CSP forbids inline style attributes,
+   so visibility is toggled exclusively through this class. */
+.hidden {
+  display: none !important;
+}
+
 /* Training status text (below controls) */
 
 .training-status-text {
-  font-size: 12px;
+  margin-top: 8px;
+  padding: 8px;
+  background: #1a1f2e;
+  border-radius: 8px;
+  font-size: 13px;
   line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* Live platform forecast card */
+
+.forecast-body {
+  padding: 16px;
+  text-align: center;
+}
+
+.forecast-platform {
+  font-size: 32px;
+  font-weight: 700;
+  margin: 8px 0;
+}
+
+.forecast-confidence {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.forecast-note {
+  font-size: 12px;
   color: #6b7280;
+  margin-top: 8px;
+}
+
+/* Platform colours — applied to forecast + prediction-result text */
+.platform-left {
+  color: var(--ax); /* red */
+}
+
+.platform-right {
+  color: var(--ay); /* green */
 }
 
 /* Modal for labeling (CSP-safe, no inline styles) */

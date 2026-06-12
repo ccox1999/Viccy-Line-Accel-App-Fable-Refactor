@@ -103,9 +103,11 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
 
   // ============ FREQUENCY-DOMAIN FEATURES (FFT) ============
 
-  // Extract the first ~16 FFT magnitude bins (low frequencies where vibration signature lives).
-  // High-frequency noise is filtered out.
-  const fftMags = computeFFT(accelMagnitudes, sampleRateHz, 64);
+  // Remove the DC offset first — accel magnitude has a large constant
+  // component that would otherwise swamp bin 0. The mean is already its
+  // own feature (accel_mag_mean), so only the oscillation matters here.
+  const centeredMagnitudes = accelMagnitudes.map((v) => v - accelMagMean);
+  const fftMags = computeFFT(centeredMagnitudes, sampleRateHz, 64);
   const fftFeatures = fftMags.slice(0, 8); // 8 FFT bins
 
   // Spectral entropy: how "noisy" vs "tonal" the vibration is.
@@ -205,14 +207,15 @@ export function extractFeaturesWindowed(
 
   while (startIdx + samplesPerWindow <= motionData.length) {
     const window = motionData.slice(startIdx, startIdx + samplesPerWindow);
-    const features = extractFeatures(window, sampleRateHz);
 
-    // Annotate the feature vector with its position in the recording
-    // (useful for debugging / visualization).
-    features.windowEndIndex = startIdx + samplesPerWindow;
-    features.windowEndTime = window[window.length - 1]?.time ?? 0;
-
-    results.push(features);
+    // Window position is returned ALONGSIDE the features, never mixed into
+    // them — a raw epoch timestamp inside the feature vector would dominate
+    // every distance calculation the classifier makes.
+    results.push({
+      features: extractFeatures(window, sampleRateHz),
+      windowEndIndex: startIdx + samplesPerWindow,
+      windowEndTime: window[window.length - 1]?.time ?? 0,
+    });
     startIdx += samplesPerStride;
   }
 
@@ -287,78 +290,84 @@ function computeJerk(acceleration, dt) {
 }
 
 /**
- * Simple FFT using Cooley-Tukey radix-2 algorithm.
- * Returns magnitude spectrum (first half only, since the second half is mirrored).
+ * Averaged magnitude spectrum (Welch-style periodogram).
  *
- * @param {Array<number>} signal - input samples
- * @param {number} sampleRateHz - sampling rate
- * @param {number} fftSize - FFT size (must be power of 2; pads with zeros)
- * @returns {Array<number>} magnitude spectrum, one entry per frequency bin
+ * A single 64-sample FFT only describes the first ~1 second of a recording.
+ * Instead, FFT several 64-sample chunks spread evenly across the WHOLE
+ * signal and average their magnitude spectra. This captures the dominant
+ * vibration frequencies of the entire window and is far less noisy than
+ * any single chunk.
+ *
+ * @param {Array<number>} signal - input samples (any length)
+ * @param {number} sampleRateHz - sampling rate (unused, kept for API clarity)
+ * @param {number} fftSize - chunk size (power of 2)
+ * @returns {Array<number>} averaged magnitude spectrum, fftSize/2 bins
  */
 function computeFFT(signal, sampleRateHz, fftSize = 64) {
+  const half = fftSize / 2;
   if (!Array.isArray(signal) || signal.length === 0) {
-    return Array(fftSize / 2).fill(0);
+    return Array(half).fill(0);
   }
 
-  // Ensure fftSize is valid and a power of 2
-  if (fftSize < 2 || !Number.isInteger(fftSize)) {
-    fftSize = 64;
+  // Signal shorter than one chunk: zero-pad a single FFT.
+  if (signal.length < fftSize) {
+    const padded = [...signal, ...Array(fftSize - signal.length).fill(0)];
+    return magnitudeSpectrum(padded, fftSize);
   }
 
-  // Pad to fftSize with zeros
-  const padLength = Math.max(0, fftSize - signal.length);
-  const padded = [...signal.slice(0, fftSize), ...Array(padLength).fill(0)];
+  // Spread up to 16 chunks evenly across the signal so the spectrum
+  // represents the whole window, not just its start.
+  const chunkCount = Math.min(16, Math.floor(signal.length / fftSize));
+  const stride = Math.floor(signal.length / chunkCount);
 
-  try {
-    // Simple FFT (Cooley-Tukey)
-    const fft = simpleFFT(padded);
-
-    // Convert to magnitude (|a + bi| = sqrt(a² + b²))
-    const magnitudes = fft.map((c, i) => {
-      if (i > fft.length / 2) return 0; // mirror half, skip
-      const mag = Math.sqrt(c.real ** 2 + c.imag ** 2);
-      return mag / fftSize; // normalize
-    });
-
-    return magnitudes.slice(0, fftSize / 2);
-  } catch (err) {
-    // Fallback: return zeros if FFT fails
-    console.warn("[Features] FFT failed, returning zeros:", err);
-    return Array(fftSize / 2).fill(0);
+  const sums = new Array(half).fill(0);
+  for (let c = 0; c < chunkCount; c += 1) {
+    const start = Math.min(c * stride, signal.length - fftSize);
+    const mags = magnitudeSpectrum(signal.slice(start, start + fftSize), fftSize);
+    for (let i = 0; i < half; i += 1) sums[i] += mags[i];
   }
+  return sums.map((s) => s / chunkCount);
+}
+
+/**
+ * Magnitude spectrum of one chunk (first half of the FFT output —
+ * the second half mirrors it for real-valued input).
+ */
+function magnitudeSpectrum(chunk, fftSize) {
+  const fft = simpleFFT(chunk);
+  const half = fftSize / 2;
+  const mags = new Array(half);
+  for (let i = 0; i < half; i += 1) {
+    mags[i] = Math.sqrt(fft[i].real ** 2 + fft[i].imag ** 2) / fftSize;
+  }
+  return mags;
 }
 
 /**
  * Cooley-Tukey FFT (radix-2, recursive).
- * Input size must be a power of 2.
+ * Input length must be a power of 2 (callers guarantee this).
  */
 function simpleFFT(x) {
   const n = x.length;
-  if (n <= 1) return x.map(v => ({ real: v ?? 0, imag: 0 }));
-  if (!Array.isArray(x) || n === 0) return [];
+  if (n <= 1) return x.map(v => ({ real: Number.isFinite(v) ? v : 0, imag: 0 }));
 
-  try {
-    // Divide into even and odd indices
-    const even = simpleFFT(x.filter((_, i) => i % 2 === 0));
-    const odd = simpleFFT(x.filter((_, i) => i % 2 === 1));
+  // Divide into even and odd indices
+  const even = simpleFFT(x.filter((_, i) => i % 2 === 0));
+  const odd = simpleFFT(x.filter((_, i) => i % 2 === 1));
 
-    const T = [];
-    for (let k = 0; k < n / 2; k++) {
-      const t = {
-        real: Math.cos(-2 * Math.PI * k / n),
-        imag: Math.sin(-2 * Math.PI * k / n),
-      };
-      T[k] = complexMul(t, odd[k] || { real: 0, imag: 0 });
-    }
-
-    return [
-      ...even.map((e, k) => complexAdd(e, T[k] || { real: 0, imag: 0 })),
-      ...even.map((e, k) => complexSub(e, T[k] || { real: 0, imag: 0 })),
-    ];
-  } catch (err) {
-    console.warn("[Features] FFT recursive call failed:", err);
-    return x.map(v => ({ real: v ?? 0, imag: 0 }));
+  const T = [];
+  for (let k = 0; k < n / 2; k++) {
+    const t = {
+      real: Math.cos(-2 * Math.PI * k / n),
+      imag: Math.sin(-2 * Math.PI * k / n),
+    };
+    T[k] = complexMul(t, odd[k]);
   }
+
+  return [
+    ...even.map((e, k) => complexAdd(e, T[k])),
+    ...even.map((e, k) => complexSub(e, T[k])),
+  ];
 }
 
 function complexAdd(a, b) {
@@ -435,8 +444,9 @@ function getNullFeatures() {
 export function euclideanDistance(feat1, feat2) {
   let sumSqDiff = 0;
   for (const key in feat1) {
-    const v1 = feat1[key] ?? 0;
-    const v2 = feat2[key] ?? 0;
+    const v1 = feat1[key];
+    if (!Number.isFinite(v1)) continue; // skip any non-numeric metadata
+    const v2 = Number.isFinite(feat2[key]) ? feat2[key] : 0;
     sumSqDiff += (v1 - v2) ** 2;
   }
   return Math.sqrt(sumSqDiff);
@@ -489,11 +499,11 @@ export function computeFeatureStats(featureVectors) {
 
     const min = Math.min(...values);
     const max = Math.max(...values);
-    const mean = sum(values) / values.length;
-    const variance = mean(values.map(v => (v - mean) ** 2));
+    const meanVal = sum(values) / values.length;
+    const variance = sum(values.map(v => (v - meanVal) ** 2)) / values.length;
     const stdDev = Math.sqrt(variance);
 
-    stats[key] = { min, max, mean, stdDev };
+    stats[key] = { min, max, mean: meanVal, stdDev };
   }
 
   return stats;

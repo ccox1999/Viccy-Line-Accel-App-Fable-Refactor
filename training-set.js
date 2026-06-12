@@ -2,11 +2,16 @@
    Victoria Line Motion Lab — training set manager
 
    Manages the labeled training dataset:
-   - Storage (localStorage for small sets, IndexedDB for large)
-   - Load/save operations
+   - localStorage persistence (feature vectors are tiny — ~35 floats
+     per example — so even hundreds of trips fit comfortably)
    - Add/remove examples
    - Export/import JSON
-   - Metadata tracking (recording ID, timestamp, confidence)
+   - Metadata tracking (recording ID, timestamp, notes)
+
+   Each example stores the EXTRACTED FEATURES of a trip, not the raw
+   motion samples. Features are all the k-NN classifier needs, and raw
+   recordings can always be saved separately via the app's normal
+   "Save Recording" export.
    ============================================================ */
 
 "use strict";
@@ -14,36 +19,27 @@
 /**
  * Training set manager.
  *
- * Stores labeled motion recordings (left or right platform arrival).
- * Each example is linked back to a raw motion recording for traceability.
- *
- * Storage strategy:
- * - Small sets (< 100 examples): localStorage as JSON
- * - Large sets: IndexedDB (larger quota, better performance)
- *
  * Usage:
- *   const trainSet = new TrainingSet("victoria-line-v1");
- *   await trainSet.load(); // load from persistent storage
- *   trainSet.add(motionData, direction, { ...metadata });
+ *   const trainSet = new TrainingSet();
+ *   await trainSet.load();                      // from localStorage
+ *   trainSet.add(features, "left", { ... });    // features from extractFeatures()
  *   await trainSet.save();
- *   const json = trainSet.toJSON();
  */
 export class TrainingSet {
   constructor(storageKey = "victoria-line-training-set") {
     this.storageKey = storageKey;
-    this.examples = []; // [{id, motionData, features, label, timestamp, ...}, ...]
+    this.examples = []; // [{id, features, label, timestamp, recordingId, notes}, ...]
     this.nextId = 1;
   }
 
   /**
-   * Load training set from persistent storage (localStorage).
+   * Load training set from localStorage.
    */
   async load() {
     try {
       const stored = localStorage.getItem(this.storageKey);
       if (stored) {
-        const data = JSON.parse(stored);
-        this.fromJSON(data);
+        this.fromJSON(JSON.parse(stored));
         console.log(`[TrainingSet] Loaded ${this.examples.length} examples from localStorage`);
         return;
       }
@@ -55,11 +51,10 @@ export class TrainingSet {
   }
 
   /**
-   * Save training set to persistent storage (localStorage).
+   * Save training set to localStorage.
    */
   async save() {
-    const json = this.toJSON();
-    const jsonStr = JSON.stringify(json);
+    const jsonStr = JSON.stringify(this.toJSON());
     const sizeKB = new Blob([jsonStr]).size / 1024;
 
     try {
@@ -74,38 +69,30 @@ export class TrainingSet {
   /**
    * Add a new training example.
    *
-   * @param {Array|Object} motionDataOrFeatures - raw motion data OR pre-extracted features
+   * @param {Object} features - feature vector from extractFeatures()
    * @param {string} label - "left" or "right"
-   * @param {Object} metadata - optional {recordingId, timestamp, confidence, ...}
+   * @param {Object} metadata - optional {recordingId, timestamp, notes}
    * @returns {string} unique example ID
    */
-  add(motionDataOrFeatures, label, metadata = {}) {
+  add(features, label, metadata = {}) {
     if (!["left", "right"].includes(label)) {
       throw new Error(`Invalid label: ${label}. Must be "left" or "right".`);
     }
 
-    const id = `example-${this.nextId++}`;
-    const timestamp = metadata.timestamp || Date.now();
-
-    // Accept either raw motion data (array) or pre-extracted features (object)
-    let features = null;
-    if (Array.isArray(motionDataOrFeatures)) {
-      // It's raw motion data - we'll extract features if needed later
-      features = null;
-    } else if (typeof motionDataOrFeatures === "object") {
-      // It's already features
-      features = motionDataOrFeatures;
-    } else {
-      throw new Error("First argument must be motion data array or features object.");
+    if (Array.isArray(features) || features === null || typeof features !== "object") {
+      throw new Error(
+        "Pass a FEATURES object (from extractFeatures), not raw motion data."
+      );
     }
+
+    const id = `example-${this.nextId++}`;
 
     this.examples.push({
       id,
-      features, // Store features (lightweight), not raw motion data
+      features: { ...features },
       label,
-      timestamp,
+      timestamp: metadata.timestamp || Date.now(),
       recordingId: metadata.recordingId || id,
-      confidence: metadata.confidence ?? null,
       notes: metadata.notes ?? "",
     });
 
@@ -169,16 +156,15 @@ export class TrainingSet {
    */
   toJSON() {
     return {
-      version: 1,
+      version: 2, // v2: examples carry `features`, not raw `motionData`
       storageKey: this.storageKey,
       exportTimestamp: Date.now(),
       examples: this.examples.map(ex => ({
         id: ex.id,
-        motionData: ex.motionData,
+        features: ex.features,
         label: ex.label,
         timestamp: ex.timestamp,
         recordingId: ex.recordingId,
-        confidence: ex.confidence,
         notes: ex.notes,
       })),
     };
@@ -186,95 +172,43 @@ export class TrainingSet {
 
   /**
    * Import training set from JSON.
+   * Examples without a features object (e.g. from an old v1 export that
+   * stored raw motion data) are skipped with a warning — they can't be
+   * used for prediction.
    */
   fromJSON(json) {
     if (!json.examples || !Array.isArray(json.examples)) {
       throw new Error("Invalid training set JSON format");
     }
 
-    this.examples = json.examples.map(ex => ({
-      ...ex,
-      motionData: ex.motionData, // already compressed
-    }));
+    const usable = [];
+    let skipped = 0;
+    for (const ex of json.examples) {
+      if (ex.features && typeof ex.features === "object" && !Array.isArray(ex.features)) {
+        usable.push({
+          id: ex.id,
+          features: ex.features,
+          label: ex.label,
+          timestamp: ex.timestamp,
+          recordingId: ex.recordingId,
+          notes: ex.notes ?? "",
+        });
+      } else {
+        skipped++;
+      }
+    }
+    if (skipped > 0) {
+      console.warn(`[TrainingSet] Skipped ${skipped} example(s) with no feature vector (old format)`);
+    }
 
-    this.nextId = Math.max(...this.examples.map(ex => {
-      const match = ex.id.match(/example-(\d+)/);
-      return match ? parseInt(match[1], 10) : 0;
-    })) + 1;
-  }
+    this.examples = usable;
 
-  /**
-   * Compress motion data (remove duplicate/unchanged fields, round values).
-   * Reduces JSON size by ~50%.
-   */
-  compressMotionData(motionData) {
-    // For now, just store as-is. Could implement delta compression if storage becomes an issue.
-    return motionData.map(s => ({
-      ax: Math.round(s.ax * 1000) / 1000,
-      ay: Math.round(s.ay * 1000) / 1000,
-      az: Math.round(s.az * 1000) / 1000,
-      rotationAlpha: Math.round(s.rotationAlpha * 10) / 10,
-      rotationBeta: Math.round(s.rotationBeta * 10) / 10,
-      rotationGamma: Math.round(s.rotationGamma * 10) / 10,
-    }));
-  }
-
-  /**
-   * Save to IndexedDB (for larger sets).
-   */
-  async saveToIndexedDB(json) {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open("victoriaLineMotionLab", 1);
-
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("trainingSet", "readwrite");
-        const store = tx.objectStore("trainingSet");
-
-        try {
-          store.put({ key: this.storageKey, data: json });
-          tx.oncomplete = resolve;
-          tx.onerror = () => reject(tx.error);
-        } catch (err) {
-          reject(err);
-        }
-      };
-
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains("trainingSet")) {
-          db.createObjectStore("trainingSet", { keyPath: "key" });
-        }
-      };
-    });
-  }
-
-  /**
-   * Load from IndexedDB.
-   */
-  async loadFromIndexedDB() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open("victoriaLineMotionLab", 1);
-
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains("trainingSet")) {
-          resolve(null);
-          return;
-        }
-
-        const tx = db.transaction("trainingSet", "readonly");
-        const store = tx.objectStore("trainingSet");
-        const getRequest = store.get(this.storageKey);
-
-        getRequest.onerror = () => reject(getRequest.error);
-        getRequest.onsuccess = () => {
-          resolve(getRequest.result?.data ?? null);
-        };
-      };
-    });
+    // Resume ID numbering after the highest existing ID (0 when empty).
+    const maxId = this.examples.reduce((max, ex) => {
+      const match = /example-(\d+)/.exec(ex.id ?? "");
+      return match ? Math.max(max, parseInt(match[1], 10)) : max;
+    }, 0);
+    this.nextId = maxId + 1;
   }
 
   /**
@@ -296,8 +230,6 @@ export class TrainingSet {
    */
   getStats() {
     const counts = this.countByLabel();
-    const totalSamples = this.examples.reduce((sum, ex) => sum + (ex.motionData?.length ?? 0), 0);
-    const avgSamplesPerExample = this.examples.length > 0 ? totalSamples / this.examples.length : 0;
 
     const oldest = this.examples.length > 0
       ? Math.min(...this.examples.map(ex => ex.timestamp))
@@ -311,8 +243,6 @@ export class TrainingSet {
       leftCount: counts.left,
       rightCount: counts.right,
       balance: counts.left > 0 ? (counts.right / counts.left).toFixed(2) : "N/A",
-      totalSamples,
-      avgSamplesPerExample: Math.round(avgSamplesPerExample),
       oldestTimestamp: oldest,
       newestTimestamp: newest,
       isReadyForTraining: this.isReadyForTraining(),
@@ -324,5 +254,5 @@ export class TrainingSet {
  * Helper: create a unique recording ID (for metadata tracking).
  */
 export function generateRecordingId() {
-  return `recording-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  return `recording-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }

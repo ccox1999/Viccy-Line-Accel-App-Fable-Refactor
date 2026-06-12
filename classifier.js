@@ -13,13 +13,17 @@
 
 "use strict";
 
-import { euclideanDistance } from "./features.js";
-
 /**
  * k-Nearest Neighbors classifier for binary classification.
  *
+ * Distances are computed over Z-SCORE NORMALIZED features: each feature is
+ * rescaled to (value - mean) / stdDev using statistics from the training
+ * set. Without this, large-magnitude features (energy ~hundreds) drown out
+ * the small directional features (skewness ~±1) that actually distinguish
+ * a left turn from a right turn.
+ *
  * Usage:
- *   const clf = new KNNClassifier(k = 5);
+ *   const clf = new KNNClassifier(5);
  *   clf.addTrainingExample(featureVector, "left");
  *   clf.addTrainingExample(featureVector, "right");
  *   const pred = clf.predict(newFeatureVector);
@@ -29,6 +33,7 @@ export class KNNClassifier {
   constructor(k = 5) {
     this.k = k;
     this.examples = []; // [{features, label, recordingId, timestamp}, ...]
+    this._normCache = null; // { stats, vectors } — rebuilt lazily after changes
   }
 
   /**
@@ -52,6 +57,7 @@ export class KNNClassifier {
       label,
       ...metadata,
     });
+    this._normCache = null; // stats are stale now
   }
 
   /**
@@ -59,6 +65,7 @@ export class KNNClassifier {
    */
   clear() {
     this.examples = [];
+    this._normCache = null;
   }
 
   /**
@@ -152,23 +159,79 @@ export class KNNClassifier {
 
   /**
    * Find the k nearest neighbors to a feature vector.
+   * Distances are computed in z-score-normalized space.
    *
    * @param {Object} features - query feature vector
    * @param {number} k - number of neighbors to return
    * @returns {Array} sorted by distance (nearest first), each with distance
    */
   findNearestNeighbors(features, k = this.k) {
-    const distances = this.examples.map((ex, idx) => ({
-      ...ex,
-      distance: euclideanDistance(features, ex.features),
-      index: idx,
-    }));
+    const { stats, vectors } = this._ensureNormCache();
+    const query = this._normalize(features, stats);
+
+    const distances = this.examples.map((ex, idx) => {
+      const v = vectors[idx];
+      let sumSq = 0;
+      for (const key in query) {
+        const d = query[key] - (v[key] ?? 0);
+        sumSq += d * d;
+      }
+      return { ...ex, distance: Math.sqrt(sumSq), index: idx };
+    });
 
     // Sort by distance (nearest first)
     distances.sort((a, b) => a.distance - b.distance);
 
     // Return top k
     return distances.slice(0, Math.min(k, distances.length));
+  }
+
+  /**
+   * Build (or reuse) per-feature mean/stdDev over the training set, plus
+   * the normalized training vectors. Invalidated on add/clear.
+   */
+  _ensureNormCache() {
+    if (this._normCache) return this._normCache;
+
+    // Collect every numeric feature key seen in training data.
+    const keys = new Set();
+    for (const ex of this.examples) {
+      for (const key in ex.features) {
+        if (Number.isFinite(ex.features[key])) keys.add(key);
+      }
+    }
+
+    const n = this.examples.length;
+    const stats = {};
+    for (const key of keys) {
+      let total = 0;
+      for (const ex of this.examples) total += ex.features[key] ?? 0;
+      const mean = total / n;
+      let sumSq = 0;
+      for (const ex of this.examples) {
+        const d = (ex.features[key] ?? 0) - mean;
+        sumSq += d * d;
+      }
+      stats[key] = { mean, stdDev: Math.sqrt(sumSq / n) };
+    }
+
+    const vectors = this.examples.map((ex) => this._normalize(ex.features, stats));
+    this._normCache = { stats, vectors };
+    return this._normCache;
+  }
+
+  /**
+   * Z-score normalize a feature vector against training-set stats.
+   * Features with zero variance carry no information and map to 0.
+   */
+  _normalize(features, stats) {
+    const out = {};
+    for (const key in stats) {
+      const { mean, stdDev } = stats[key];
+      const v = Number.isFinite(features[key]) ? features[key] : mean;
+      out[key] = stdDev > 0 ? (v - mean) / stdDev : 0;
+    }
+    return out;
   }
 
   /**

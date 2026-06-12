@@ -106,15 +106,36 @@ Internally the app timestamps samples with the monotonic
 converts back to epoch milliseconds on export, so the file format is
 unchanged from earlier versions.
 
+## Platform prediction (ML)
+
+Beyond raw recording, the app can learn to predict which of Brixton's two
+platforms a train is heading for, from the vibration signature of the
+Stockwell → Brixton junction:
+
+1. Record a trip, then label it **left** or **right** when prompted
+   (or via the **🏷️ Label & Train** button). The trip's feature vector
+   is stored in localStorage.
+2. Once you have 5+ labeled examples of each platform, **🔮 Predict
+   Platform** classifies the current recording (k-nearest neighbours over
+   z-score-normalised time/frequency/asymmetry features).
+3. While recording, a **Live Platform Forecast** card re-predicts every
+   5 seconds from the last 10 seconds of motion.
+
+The **🧪 Test Data** button seeds 10 fake examples so the flow can be
+tested without real trips. See `TESTING.md` and `ML-INTEGRATION-GUIDE.md`.
+
 ## Project structure
 
 ```
-index.html     App shell and markup
-style.css      Mobile-first styles (safe areas, touch targets, states)
-app.js         Sensor capture, chart rendering, export
-manifest.json  PWA install metadata
-sw.js          Service worker — offline app-shell cache (optional)
-README.md      This file
+index.html       App shell and markup
+style.css        Mobile-first styles (safe areas, touch targets, states)
+app.js           Sensor capture, chart rendering, export, ML wiring
+features.js      Feature extraction (time/frequency/statistical, ES module)
+classifier.js    k-NN classifier with z-score normalisation (ES module)
+training-set.js  Labeled training data manager, localStorage (ES module)
+manifest.json    PWA install metadata
+sw.js            Service worker — offline app-shell cache (optional)
+README.md        This file
 ```
 
 **When you edit any file, bump `CACHE_VERSION` in `sw.js`** (e.g.
