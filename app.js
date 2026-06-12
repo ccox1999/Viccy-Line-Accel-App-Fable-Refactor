@@ -276,7 +276,8 @@ async function loadMLModules() {
           ...s,
           ay: s.ay - 0.3,
         }));
-        state.trainSet.add(leftMotion, "left", { notes: `Fake left ${i}` });
+        const leftFeatures = ml.features.extractFeatures(leftMotion, 60);
+        state.trainSet.add(leftFeatures, "left", { notes: `Fake left ${i}` });
       }
 
       // Add 5 RIGHT examples (positive Y-axis bias simulates right turn)
@@ -285,7 +286,8 @@ async function loadMLModules() {
           ...s,
           ay: s.ay + 0.3,
         }));
-        state.trainSet.add(rightMotion, "right", { notes: `Fake right ${i}` });
+        const rightFeatures = ml.features.extractFeatures(rightMotion, 60);
+        state.trainSet.add(rightFeatures, "right", { notes: `Fake right ${i}` });
       }
 
       await state.trainSet.save();
@@ -521,11 +523,11 @@ async function loadMLModules() {
 
       const ml = await loadMLModules();
 
-      // Extract features from the recording
+      // Extract features from the recording (lightweight storage)
       const features = ml.features.extractFeatures(state.data, 60);
 
-      // Add to training set
-      state.trainSet.add(state.data, label, {
+      // Add features (not raw motion data) to training set
+      state.trainSet.add(features, label, {
         recordingId: `recording-${Date.now()}-${Math.random()
           .toString(36)
           .substr(2, 9)}`,

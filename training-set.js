@@ -74,26 +74,34 @@ export class TrainingSet {
   /**
    * Add a new training example.
    *
-   * @param {Array} motionData - raw motion samples [{time, ax, ay, az, rotationAlpha, ...}, ...]
+   * @param {Array|Object} motionDataOrFeatures - raw motion data OR pre-extracted features
    * @param {string} label - "left" or "right"
    * @param {Object} metadata - optional {recordingId, timestamp, confidence, ...}
    * @returns {string} unique example ID
    */
-  add(motionData, label, metadata = {}) {
+  add(motionDataOrFeatures, label, metadata = {}) {
     if (!["left", "right"].includes(label)) {
       throw new Error(`Invalid label: ${label}. Must be "left" or "right".`);
-    }
-
-    if (!Array.isArray(motionData) || motionData.length === 0) {
-      throw new Error("motionData must be a non-empty array.");
     }
 
     const id = `example-${this.nextId++}`;
     const timestamp = metadata.timestamp || Date.now();
 
+    // Accept either raw motion data (array) or pre-extracted features (object)
+    let features = null;
+    if (Array.isArray(motionDataOrFeatures)) {
+      // It's raw motion data - we'll extract features if needed later
+      features = null;
+    } else if (typeof motionDataOrFeatures === "object") {
+      // It's already features
+      features = motionDataOrFeatures;
+    } else {
+      throw new Error("First argument must be motion data array or features object.");
+    }
+
     this.examples.push({
       id,
-      motionData: this.compressMotionData(motionData),
+      features, // Store features (lightweight), not raw motion data
       label,
       timestamp,
       recordingId: metadata.recordingId || id,
