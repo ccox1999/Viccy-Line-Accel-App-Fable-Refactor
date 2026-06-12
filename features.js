@@ -296,20 +296,36 @@ function computeJerk(acceleration, dt) {
  * @returns {Array<number>} magnitude spectrum, one entry per frequency bin
  */
 function computeFFT(signal, sampleRateHz, fftSize = 64) {
+  if (!Array.isArray(signal) || signal.length === 0) {
+    return Array(fftSize / 2).fill(0);
+  }
+
+  // Ensure fftSize is valid and a power of 2
+  if (fftSize < 2 || !Number.isInteger(fftSize)) {
+    fftSize = 64;
+  }
+
   // Pad to fftSize with zeros
-  const padded = [...signal, ...Array(fftSize - signal.length).fill(0)];
+  const padLength = Math.max(0, fftSize - signal.length);
+  const padded = [...signal.slice(0, fftSize), ...Array(padLength).fill(0)];
 
-  // Simple FFT (Cooley-Tukey)
-  const fft = simpleFFT(padded);
+  try {
+    // Simple FFT (Cooley-Tukey)
+    const fft = simpleFFT(padded);
 
-  // Convert to magnitude (|a + bi| = sqrt(a² + b²))
-  const magnitudes = fft.map((c, i) => {
-    if (i > fft.length / 2) return 0; // mirror half, skip
-    const mag = Math.sqrt(c.real ** 2 + c.imag ** 2);
-    return mag / fftSize; // normalize
-  });
+    // Convert to magnitude (|a + bi| = sqrt(a² + b²))
+    const magnitudes = fft.map((c, i) => {
+      if (i > fft.length / 2) return 0; // mirror half, skip
+      const mag = Math.sqrt(c.real ** 2 + c.imag ** 2);
+      return mag / fftSize; // normalize
+    });
 
-  return magnitudes.slice(0, fftSize / 2);
+    return magnitudes.slice(0, fftSize / 2);
+  } catch (err) {
+    // Fallback: return zeros if FFT fails
+    console.warn("[Features] FFT failed, returning zeros:", err);
+    return Array(fftSize / 2).fill(0);
+  }
 }
 
 /**
@@ -318,25 +334,31 @@ function computeFFT(signal, sampleRateHz, fftSize = 64) {
  */
 function simpleFFT(x) {
   const n = x.length;
-  if (n <= 1) return x.map(v => ({ real: v, imag: 0 }));
+  if (n <= 1) return x.map(v => ({ real: v ?? 0, imag: 0 }));
+  if (!Array.isArray(x) || n === 0) return [];
 
-  // Divide into even and odd indices
-  const even = simpleFFT(x.filter((_, i) => i % 2 === 0));
-  const odd = simpleFFT(x.filter((_, i) => i % 2 === 1));
+  try {
+    // Divide into even and odd indices
+    const even = simpleFFT(x.filter((_, i) => i % 2 === 0));
+    const odd = simpleFFT(x.filter((_, i) => i % 2 === 1));
 
-  const T = [];
-  for (let k = 0; k < n / 2; k++) {
-    const t = {
-      real: Math.cos(-2 * Math.PI * k / n),
-      imag: Math.sin(-2 * Math.PI * k / n),
-    };
-    T[k] = complexMul(t, odd[k]);
+    const T = [];
+    for (let k = 0; k < n / 2; k++) {
+      const t = {
+        real: Math.cos(-2 * Math.PI * k / n),
+        imag: Math.sin(-2 * Math.PI * k / n),
+      };
+      T[k] = complexMul(t, odd[k] || { real: 0, imag: 0 });
+    }
+
+    return [
+      ...even.map((e, k) => complexAdd(e, T[k] || { real: 0, imag: 0 })),
+      ...even.map((e, k) => complexSub(e, T[k] || { real: 0, imag: 0 })),
+    ];
+  } catch (err) {
+    console.warn("[Features] FFT recursive call failed:", err);
+    return x.map(v => ({ real: v ?? 0, imag: 0 }));
   }
-
-  return [
-    ...even.map((e, k) => complexAdd(e, T[k])),
-    ...even.map((e, k) => complexSub(e, T[k])),
-  ];
 }
 
 function complexAdd(a, b) {
