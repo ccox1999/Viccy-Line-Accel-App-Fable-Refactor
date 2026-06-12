@@ -104,6 +104,30 @@
           Clear
         </button>
       </div>
+
+      <!-- ML Prediction Controls -->
+      <div class="controls-row">
+        <button type="button" id="predictBtn" class="btn btn-outline" disabled title="Analyze recording and predict platform">
+          🔮 Predict Platform
+        </button>
+        <button type="button" id="labelBtn" class="btn btn-outline" disabled title="Label this trip for training">
+          🏷️ Label & Train
+        </button>
+      </div>
+
+      <div id="trainingStatus" class="training-status-text" style="display: none; margin-top: 8px; padding: 8px; background: #1a1f2e; border-radius: 8px; font-size: 13px; color: #a8adc2;"></div>
+    </section>
+
+    <!-- Live Platform Forecast (shown during recording) -->
+    <section id="liveForcastCard" class="card chart-card" aria-label="Live platform forecast" style="display: none;">
+      <div class="chart-header">
+        <h2 class="chart-title">Live Platform Forecast</h2>
+      </div>
+      <div style="padding: 16px; text-align: center;">
+        <div id="forecastPlatform" style="font-size: 32px; font-weight: bold; margin: 8px 0;">—</div>
+        <div id="forecastConfidence" style="font-size: 14px; color: #a8adc2;">Confidence: —</div>
+        <div id="forecastNote" style="font-size: 12px; color: #6b7280; margin-top: 8px;">Waiting for data…</div>
+      </div>
     </section>
 
     <!-- ACCELERATION CHART -->

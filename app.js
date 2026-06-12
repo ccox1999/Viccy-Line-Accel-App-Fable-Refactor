@@ -20,9 +20,26 @@
      Cohen–Sutherland clipping and the ctx.__lastPoint hack.
    - Saving uses the iOS share sheet (Web Share API) when available,
      falling back to a classic download elsewhere.
+
+   ML Integration:
+   - Phase 1: Post-hoc platform prediction after recording
+   - Phase 2: Live streaming prediction during recording (~every 5 seconds)
    ============================================================ */
 
 "use strict";
+
+// Dynamic imports for ML modules (loaded asynchronously to avoid blocking startup)
+let mlModules = null;
+async function loadMLModules() {
+  if (mlModules) return mlModules;
+  const [features, classifier, trainingSet] = await Promise.all([
+    import("./features.js"),
+    import("./classifier.js"),
+    import("./training-set.js"),
+  ]);
+  mlModules = { features, classifier, trainingSet };
+  return mlModules;
+}
 
 (() => {
   // ---------- Configuration ----------------------------------------------
@@ -70,6 +87,8 @@
       recordBtn: requireElement("recordBtn"),
       saveBtn: requireElement("saveBtn"),
       clearBtn: requireElement("clearBtn"),
+      predictBtn: requireElement("predictBtn"),
+      labelBtn: requireElement("labelBtn"),
       sensorStatus: requireElement("sensorStatus"),
       sessionState: requireElement("sessionState"),
       sampleCount: requireElement("sampleCount"),
@@ -77,6 +96,11 @@
       duration: requireElement("duration"),
       accelCanvas: requireElement("accelChart"),
       gyroCanvas: requireElement("gyroChart"),
+      trainingStatus: requireElement("trainingStatus"),
+      liveForcastCard: requireElement("liveForcastCard"),
+      forecastPlatform: requireElement("forecastPlatform"),
+      forecastConfidence: requireElement("forecastConfidence"),
+      forecastNote: requireElement("forecastNote"),
     };
   } catch (err) {
     console.error("[MotionLab] Startup failed:", err);
@@ -107,9 +131,13 @@
     rafId: null,         // current requestAnimationFrame handle
     lastStatsAt: 0,      // last counter-text update (rAF timestamp)
     watchdogId: null,    // "no sensor data" timer
-    // Snapshot so exports can convert monotonic times back to epoch ms
-    // (keeps the JSON format identical to the original app's output).
     epochBase: Date.now() - performance.now(),
+
+    // ML state (Phase 1 & 2)
+    trainSet: null,           // TrainingSet instance (loaded on init)
+    classifier: null,         // KNNClassifier instance (rebuilt each prediction)
+    lastPredictionAt: 0,      // timestamp of last live prediction (Phase 2)
+    lastLivePrediction: null, // { label, confidence, neighbors } from Phase 2
   };
 
   // ---------- Small helpers ------------------------------------------------
@@ -211,6 +239,268 @@
     }
   }
 
+  // ---------- ML Platform Prediction (Phase 1 & 2) -------------------------
+
+  /**
+   * Update the training status text to show current dataset size.
+   */
+  async function updateTrainingStatus() {
+    if (!state.trainSet) return;
+    const stats = state.trainSet.getStats();
+    const { leftCount, rightCount, isReadyForTraining } = stats;
+    const text = `Training data: ${leftCount}L / ${rightCount}R${
+      isReadyForTraining ? " ✓ Ready to predict" : " (need 5+ of each)"
+    }`;
+    ui.trainingStatus.textContent = text;
+    ui.trainingStatus.style.display = "block";
+
+    // Enable predict/label buttons only if we have training data
+    ui.predictBtn.disabled = !isReadyForTraining || state.data.length === 0;
+    ui.labelBtn.disabled = state.data.length === 0;
+  }
+
+  /**
+   * Phase 2: Make a live prediction from the last N seconds of data.
+   * Called every 5 seconds during recording.
+   */
+  async function makeLivePrediction() {
+    if (!state.trainSet || state.trainSet.count() < 5) return;
+    if (state.data.length < 30) return; // need at least 0.5s of data
+
+    try {
+      const ml = await loadMLModules();
+
+      // Get the last 10 seconds of data
+      const windowMs = 10000;
+      const latest = state.data[state.data.length - 1]?.time ?? 0;
+      const windowStart = latest - windowMs;
+      const idx = firstIndexAtOrAfter(state.data, windowStart);
+      const window = state.data.slice(idx);
+
+      if (window.length < 30) return;
+
+      // Extract features
+      const features = ml.features.extractFeatures(window, 60);
+
+      // Build classifier from training set (lightweight, done each prediction)
+      if (!state.classifier) {
+        state.classifier = new ml.classifier.KNNClassifier(5);
+      }
+
+      // Rebuild classifier with current training data (ensures fresh examples)
+      state.classifier.clear();
+      for (const ex of state.trainSet.examples) {
+        state.classifier.addTrainingExample(ex.features, ex.label, {
+          recordingId: ex.recordingId,
+        });
+      }
+
+      // Predict
+      const prediction = state.classifier.predict(features);
+      state.lastLivePrediction = prediction;
+
+      // Update UI
+      const platformColor =
+        prediction.label === "left" ? "#ff375f" : "#32d74b";
+      ui.forecastPlatform.textContent = prediction.label.toUpperCase();
+      ui.forecastPlatform.style.color = platformColor;
+      ui.forecastConfidence.textContent = `Confidence: ${(
+        prediction.confidence * 100
+      ).toFixed(0)}%`;
+      ui.forecastNote.textContent = `${prediction.rawVotes.left}/${
+        prediction.rawVotes.right
+      } neighbors`;
+    } catch (err) {
+      console.warn("[ML] Live prediction failed:", err);
+    }
+  }
+
+  /**
+   * Phase 1: Post-hoc prediction after recording stops.
+   */
+  async function predictPlatform() {
+    if (!state.trainSet || state.trainSet.count() < 5) {
+      alert(
+        `Need at least 5 labeled examples to predict. Currently have ${state.trainSet?.count() ?? 0}.`
+      );
+      return;
+    }
+
+    if (state.data.length === 0) {
+      alert("No recording to analyze.");
+      return;
+    }
+
+    try {
+      ui.predictBtn.disabled = true;
+      const ml = await loadMLModules();
+
+      // Extract features
+      const features = ml.features.extractFeatures(state.data, 60);
+
+      // Build classifier
+      const clf = new ml.classifier.KNNClassifier(5);
+      for (const ex of state.trainSet.examples) {
+        clf.addTrainingExample(ex.features, ex.label, {
+          recordingId: ex.recordingId,
+        });
+      }
+
+      // Predict
+      const prediction = clf.predict(features);
+
+      // Show result in a card
+      const resultCard = document.createElement("div");
+      resultCard.className = "card";
+      resultCard.innerHTML = `
+        <h3 style="margin: 0 0 12px;">Platform Prediction</h3>
+        <div style="text-align: center; padding: 12px 0;">
+          <div style="font-size: 32px; font-weight: bold; margin: 8px 0; color: ${
+            prediction.label === "left" ? "#ff375f" : "#32d74b"
+          }">
+            ${prediction.label.toUpperCase()}
+          </div>
+          <div style="font-size: 14px; color: #a8adc2; margin: 8px 0;">
+            Confidence: ${(prediction.confidence * 100).toFixed(0)}%
+          </div>
+          <div style="font-size: 12px; color: #6b7280;">
+            ${prediction.rawVotes.left} left / ${prediction.rawVotes.right} right neighbors
+          </div>
+        </div>
+        <button onclick="this.parentElement.remove()" style="
+          width: 100%;
+          padding: 8px;
+          margin-top: 8px;
+          background: #1c1f2b;
+          border: 1px solid #262833;
+          border-radius: 8px;
+          color: #f5f7ff;
+          cursor: pointer;
+          font-size: 14px;
+        ">Close</button>
+      `;
+      document.querySelector(".app-shell").insertBefore(
+        resultCard,
+        document.querySelector(".chart-card")
+      );
+
+      hapticTick(20);
+    } catch (err) {
+      console.error("[ML] Prediction failed:", err);
+      alert(`Prediction failed: ${err.message}`);
+    } finally {
+      ui.predictBtn.disabled =
+        !state.trainSet?.isReadyForTraining() || state.data.length === 0;
+    }
+  }
+
+  /**
+   * Show a modal to label the current recording.
+   */
+  async function showLabelingDialog() {
+    return new Promise((resolve) => {
+      const modal = document.createElement("div");
+      modal.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0,0,0,0.8);
+        display: flex; align-items: flex-end; z-index: 9999;
+      `;
+
+      const content = document.createElement("div");
+      content.style.cssText = `
+        background: #111318;
+        border-radius: 18px 18px 0 0;
+        padding: 24px;
+        width: 100%;
+        border: 1px solid #262833;
+        border-bottom: none;
+      `;
+
+      content.innerHTML = `
+        <h2 style="margin: 0 0 12px; font-size: 18px;">Label This Trip</h2>
+        <p style="margin: 0 0 16px; font-size: 14px; color: #a8adc2;">
+          Which platform did you arrive at?
+        </p>
+        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+          <button class="btn btn-primary" style="flex: 1;" data-answer="left">
+            ← LEFT
+          </button>
+          <button class="btn btn-primary" style="flex: 1;" data-answer="right">
+            RIGHT →
+          </button>
+        </div>
+        <button class="btn btn-outline" style="width: 100%;" data-answer="skip">
+          Skip
+        </button>
+      `;
+
+      modal.appendChild(content);
+      document.body.appendChild(modal);
+
+      content.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const answer = btn.dataset.answer;
+          modal.remove();
+          resolve(answer);
+        });
+      });
+
+      // Close on background tap
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) {
+          modal.remove();
+          resolve("skip");
+        }
+      });
+    });
+  }
+
+  /**
+   * Save the current recording to the training set.
+   */
+  async function labelAndSaveToTrainingSet(label) {
+    if (label === "skip" || !["left", "right"].includes(label)) return;
+
+    try {
+      ui.labelBtn.disabled = true;
+
+      if (!state.trainSet) {
+        state.trainSet = new (await loadMLModules()).trainingSet.TrainingSet();
+        await state.trainSet.load();
+      }
+
+      const ml = await loadMLModules();
+
+      // Extract features from the recording
+      const features = ml.features.extractFeatures(state.data, 60);
+
+      // Add to training set
+      state.trainSet.add(state.data, label, {
+        recordingId: `recording-${Date.now()}-${Math.random()
+          .toString(36)
+          .substr(2, 9)}`,
+        timestamp: Date.now(),
+        notes: `User-labeled ${label} platform`,
+      });
+
+      // Save to persistent storage
+      await state.trainSet.save();
+
+      // Update UI
+      const stats = state.trainSet.getStats();
+      alert(
+        `✓ Saved to training set!\n\nTotal: ${stats.totalExamples} examples\nLeft: ${stats.leftCount} | Right: ${stats.rightCount}`
+      );
+
+      await updateTrainingStatus();
+    } catch (err) {
+      console.error("[ML] Save to training set failed:", err);
+      alert(`Failed to save: ${err.message}`);
+    } finally {
+      ui.labelBtn.disabled = state.data.length === 0;
+    }
+  }
+
   // ---------- Render loop --------------------------------------------------
 
   // At most one redraw per display frame. While recording, the loop keeps
@@ -236,6 +526,12 @@
     if (now - state.lastStatsAt > STATS_UPDATE_MS) {
       state.lastStatsAt = now;
       updateSessionInfo();
+    }
+
+    // Phase 2: Live prediction every ~5 seconds during recording
+    if (state.recording && now - state.lastPredictionAt > 5000) {
+      state.lastPredictionAt = now;
+      makeLivePrediction(); // async, doesn't block render
     }
 
     if (state.recording) scheduleRender();
@@ -487,6 +783,8 @@
     state.unsaved = false;
     state.startTime = performance.now();
     state.recording = true;
+    state.lastPredictionAt = 0;
+    state.lastLivePrediction = null;
 
     // Attach only while recording: a permanently-attached devicemotion
     // listener keeps iOS sensors powered and drains the battery even idle.
@@ -507,13 +805,21 @@
     setSessionState("Recording\u2026");
     ui.saveBtn.disabled = true;
     ui.clearBtn.disabled = true;
+    ui.predictBtn.disabled = true;
+    ui.labelBtn.disabled = true;
+
+    // Show live forecast card (Phase 2)
+    ui.liveForcastCard.style.display = "block";
+    ui.forecastPlatform.textContent = "\u2014";
+    ui.forecastConfidence.textContent = "Confidence: \u2014";
+    ui.forecastNote.textContent = "Waiting for data\u2026";
 
     hapticTick(15);
     updateSessionInfo();
     scheduleRender();
   }
 
-  function stopRecording() {
+  async function stopRecording() {
     state.recording = false;
     window.removeEventListener("devicemotion", handleMotion);
 
@@ -527,20 +833,56 @@
     ui.recordBtn.classList.add("btn-secondary");
     ui.sessionState.classList.remove("recording");
 
+    // Hide live forecast card (Phase 2)
+    ui.liveForcastCard.style.display = "none";
+
     const hasData = state.data.length > 0;
     state.unsaved = hasData;
     setSessionState(hasData ? "Recorded \u2014 not saved yet" : "Idle");
     ui.saveBtn.disabled = !hasData;
     ui.clearBtn.disabled = !hasData;
 
+    // Update predict/label button states
+    await updateTrainingStatus();
+
     hapticTick(8);
     updateSessionInfo();
     scheduleRender();
+
+    // Offer to label the recording for training (Phase 1)
+    if (hasData && state.trainSet) {
+      const shouldLabel = await new Promise((resolve) => {
+        const confirmLabel = window.confirm(
+          "Label this trip to add to your training set? (OK = yes, Cancel = skip)"
+        );
+        resolve(confirmLabel);
+      });
+
+      if (shouldLabel) {
+        const label = await showLabelingDialog();
+        if (label && label !== "skip") {
+          await labelAndSaveToTrainingSet(label);
+        }
+      }
+    }
   }
 
   ui.recordBtn.addEventListener("click", () => {
     if (state.recording) stopRecording();
     else startRecording();
+  });
+
+  // ---------- ML Platform Prediction (buttons) ------
+
+  ui.predictBtn.addEventListener("click", () => {
+    predictPlatform();
+  });
+
+  ui.labelBtn.addEventListener("click", async () => {
+    const label = await showLabelingDialog();
+    if (label && label !== "skip") {
+      await labelAndSaveToTrainingSet(label);
+    }
   });
 
   // ---------- Save / export ------------------------------------------------
@@ -662,7 +1004,7 @@
 
   // ---------- Init ---------------------------------------------------------
 
-  function init() {
+  async function init() {
     if (typeof DeviceMotionEvent === "undefined") {
       setPill("denied", "Motion sensors: not supported here");
       ui.sensorBtn.disabled = true;
@@ -678,6 +1020,19 @@
     setupResizeHandling();
     updateSessionInfo();
     resizeAllCanvases(); // also performs the first render
+
+    // Load training set asynchronously (Phase 1 & 2)
+    try {
+      const ml = await loadMLModules();
+      state.trainSet = new ml.trainingSet.TrainingSet();
+      await state.trainSet.load();
+      console.log(
+        `[ML] Loaded training set: ${state.trainSet.count()} examples`
+      );
+      await updateTrainingStatus();
+    } catch (err) {
+      console.warn("[ML] Failed to load training set:", err);
+    }
   }
 
   init();

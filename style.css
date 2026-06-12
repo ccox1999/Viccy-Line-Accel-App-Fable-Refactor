@@ -263,6 +263,14 @@ body {
   border: 1px solid var(--border);
 }
 
+/* Training status text (below controls) */
+
+.training-status-text {
+  font-size: 12px;
+  line-height: 1.4;
+  color: #6b7280;
+}
+
 /* Charts */
 
 .chart-header {
