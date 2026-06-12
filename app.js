@@ -292,21 +292,66 @@ async function loadMLModules() {
         }
       }
 
-      // Each fake trip mimics the physics of taking a fork: a SUSTAINED
-      // yaw rotation (rotationAlpha — spin about the screen-normal axis)
-      // plus a sustained lateral acceleration, buried in sensor noise.
-      // LEFT  = positive alpha (anticlockwise with the phone lying flat)
-      // RIGHT = negative alpha (clockwise)
-      // Fresh noise per example so the examples aren't co-located points.
+      // Each fake trip mimics the physics of taking a fork IN THE WORLD
+      // FRAME — a sustained yaw rotation about the world's vertical axis
+      // plus a sustained lateral push — then expresses it in a RANDOM
+      // device orientation per example. That makes the world-frame yaw the
+      // only signal consistent within a class, which is exactly the
+      // property a real phone (held however) has on a real train. The
+      // classifier's Fisher weighting discovers this on its own.
+
+      // Random orthonormal basis; rows map world vectors to device coords.
+      const randomOrientation = () => {
+        const rand = () => Math.random() * 2 - 1;
+        let r1, n1;
+        do {
+          r1 = [rand(), rand(), rand()];
+          n1 = Math.hypot(...r1);
+        } while (n1 < 0.1);
+        r1 = r1.map((v) => v / n1);
+
+        let r2, n2;
+        do {
+          const t = [rand(), rand(), rand()];
+          const d = t[0] * r1[0] + t[1] * r1[1] + t[2] * r1[2];
+          r2 = t.map((v, i) => v - d * r1[i]);
+          n2 = Math.hypot(...r2);
+        } while (n2 < 0.1);
+        r2 = r2.map((v) => v / n2);
+
+        const r3 = [
+          r1[1] * r2[2] - r1[2] * r2[1],
+          r1[2] * r2[0] - r1[0] * r2[2],
+          r1[0] * r2[1] - r1[1] * r2[0],
+        ];
+        return [r1, r2, r3];
+      };
+      const toDevice = (R, w) => [
+        R[0][0] * w[0] + R[0][1] * w[1] + R[0][2] * w[2],
+        R[1][0] * w[0] + R[1][1] * w[1] + R[1][2] * w[2],
+        R[2][0] * w[0] + R[2][1] * w[1] + R[2][2] * w[2],
+      ];
+
       const makeFakeTrip = (direction, turnRateDegPerSec) => {
         const sign = direction === "left" ? 1 : -1;
+        const R = randomOrientation();
+        // World frame: up = +z. Left fork = anticlockwise yaw (positive
+        // about up, right-hand rule) + lateral push; gravity reaction +9.81.
+        const rotD = toDevice(R, [0, 0, sign * turnRateDegPerSec]); // (ωx, ωy, ωz)
+        const accD = toDevice(R, [sign * 0.3, 0, 0]);
+        const gD = toDevice(R, [0, 0, 9.81]);
+        const noise = (scale) => (Math.random() - 0.5) * 2 * scale;
         return Array.from({ length: 3000 }, () => ({
-          ax: (Math.random() - 0.5) * 2,
-          ay: (Math.random() - 0.5) * 2 + sign * 0.3,
-          az: (Math.random() - 0.5) * 2,
-          rotationAlpha: (Math.random() - 0.5) * 30 + sign * turnRateDegPerSec,
-          rotationBeta: (Math.random() - 0.5) * 30,
-          rotationGamma: (Math.random() - 0.5) * 30,
+          ax: accD[0] + noise(1),
+          ay: accD[1] + noise(1),
+          az: accD[2] + noise(1),
+          // rotationRate axis mapping: alpha = about z, beta = x, gamma = y
+          rotationAlpha: rotD[2] + noise(15),
+          rotationBeta: rotD[0] + noise(15),
+          rotationGamma: rotD[1] + noise(15),
+          gx: gD[0] + noise(0.05),
+          gy: gD[1] + noise(0.05),
+          gz: gD[2] + noise(0.05),
         }));
       };
 
@@ -323,12 +368,14 @@ async function loadMLModules() {
       console.log("[ML] Generated 10 fake training examples");
       alert(
         "✓ Created 10 fake training examples (5 left, 5 right).\n\n" +
-          "To test: record ~10 seconds while holding the phone FLAT and " +
-          "slowly spinning it like a record.\n\n" +
-          "Spin anticlockwise → LEFT\nSpin clockwise → RIGHT\n\n" +
-          "(If your device's sign convention is mirrored you'll get the " +
-          "opposite labels — what matters is that the two spin directions " +
-          "give opposite, consistent answers.)"
+          "To test: record ~10 seconds while steadily turning the phone " +
+          "(or yourself, in a swivel chair) in one direction — ANY phone " +
+          "orientation works.\n\n" +
+          "Turn anticlockwise (seen from above) → LEFT\n" +
+          "Turn clockwise → RIGHT\n\n" +
+          "(Some devices report mirrored signs — then the labels swap. " +
+          "What matters is the two directions give opposite, consistent " +
+          "answers.)"
       );
 
       await updateTrainingStatus();
@@ -773,6 +820,7 @@ async function loadMLModules() {
 
     const acc = event.acceleration;
     const rot = event.rotationRate; // iOS reports °/s (per spec)
+    const aig = event.accelerationIncludingGravity;
 
     state.data.push({
       time: performance.now(), // monotonic — immune to clock changes
@@ -782,6 +830,15 @@ async function loadMLModules() {
       rotationAlpha: rot?.alpha ?? 0,
       rotationBeta: rot?.beta ?? 0,
       rotationGamma: rot?.gamma ?? 0,
+      // Gravity estimate in device coordinates: (accel incl. gravity) −
+      // (linear accel) is the OS's own sensor-fusion gravity vector. It
+      // tells the feature extractor which way is DOWN, which makes the
+      // turn-direction features orientation-invariant. The sign convention
+      // differs between platforms, but it's consistent per device — which
+      // is all the classifier needs.
+      gx: (aig?.x ?? 0) - (acc?.x ?? 0),
+      gy: (aig?.y ?? 0) - (acc?.y ?? 0),
+      gz: (aig?.z ?? 0) - (acc?.z ?? 0),
     });
 
     // First sample arrived — cancel the "no data" watchdog.
@@ -969,6 +1026,9 @@ async function loadMLModules() {
         rotationAlpha: s.rotationAlpha,
         rotationBeta: s.rotationBeta,
         rotationGamma: s.rotationGamma,
+        gx: s.gx ?? 0,
+        gy: s.gy ?? 0,
+        gz: s.gz ?? 0,
       }));
       const json = JSON.stringify(samples);
       const fileName = `motion-recording-${timestampForFilename()}.json`;

@@ -166,8 +166,9 @@ export class KNNClassifier {
    * @returns {Array} sorted by distance (nearest first), each with distance
    */
   findNearestNeighbors(features, k = this.k) {
-    const { stats, vectors } = this._ensureNormCache();
+    const { stats, weights, vectors } = this._ensureNormCache();
     const query = this._normalize(features, stats);
+    for (const key in query) query[key] *= weights[key] ?? 1;
 
     const distances = this.examples.map((ex, idx) => {
       const v = vectors[idx];
@@ -216,7 +217,65 @@ export class KNNClassifier {
     }
 
     const vectors = this.examples.map((ex) => this._normalize(ex.features, stats));
-    this._normCache = { stats, vectors };
+
+    // Supervised feature weighting (Fisher-style): a feature whose left
+    // and right class distributions are well separated gets more say in
+    // the distance; a feature that is the same noise in both classes gets
+    // less. This is what lets the classifier ignore orientation-dependent
+    // device-frame features when the phone is held differently between
+    // trips, and lean on the orientation-invariant ones instead — without
+    // any of that knowledge being hardcoded.
+    const weights = {};
+    const leftIdx = [];
+    const rightIdx = [];
+    this.examples.forEach((ex, i) => {
+      if (ex.label === "left") leftIdx.push(i);
+      else if (ex.label === "right") rightIdx.push(i);
+    });
+
+    if (leftIdx.length > 0 && rightIdx.length > 0) {
+      const classStats = (idxs, key) => {
+        let total = 0;
+        for (const i of idxs) total += vectors[i][key] ?? 0;
+        const mean = total / idxs.length;
+        let sumSq = 0;
+        for (const i of idxs) {
+          const d = (vectors[i][key] ?? 0) - mean;
+          sumSq += d * d;
+        }
+        return { mean, stdDev: Math.sqrt(sumSq / idxs.length) };
+      };
+
+      for (const key in stats) {
+        const L = classStats(leftIdx, key);
+        const R = classStats(rightIdx, key);
+        // +0.5 (in z-score units) regularises against tiny-sample flukes.
+        weights[key] = Math.abs(L.mean - R.mean) / (L.stdDev + R.stdDev + 0.5);
+      }
+
+      // Rescale to mean 1 and cap, so no single feature can fully
+      // dominate and the overall distance scale stays interpretable.
+      const vals = Object.values(weights);
+      const meanW = vals.reduce((a, b) => a + b, 0) / (vals.length || 1);
+      if (meanW > 0) {
+        for (const key in weights) {
+          weights[key] = Math.min(weights[key] / meanW, 5);
+        }
+      } else {
+        for (const key in weights) weights[key] = 1;
+      }
+    } else {
+      // Only one class present — uniform weights.
+      for (const key in stats) weights[key] = 1;
+    }
+
+    // Bake the weights into the cached training vectors so per-prediction
+    // work stays a plain Euclidean loop.
+    for (const v of vectors) {
+      for (const key in v) v[key] *= weights[key] ?? 1;
+    }
+
+    this._normCache = { stats, weights, vectors };
     return this._normCache;
   }
 

@@ -100,6 +100,11 @@ Exports are a flat JSON array, one object per sample:
 - `ax`, `ay`, `az` — acceleration **excluding gravity**, in m/s²
   (the charts display these divided by 9.81 to show *g*)
 - `rotationAlpha/Beta/Gamma` — rotation rate in °/s
+- `gx`, `gy`, `gz` — the OS's gravity estimate in device coordinates
+  (accelerationIncludingGravity − acceleration), in m/s². Used by the
+  ML features to find world-vertical regardless of phone orientation.
+  Older recordings without these fields still load; the
+  orientation-invariant features just read as zero for them.
 
 Internally the app timestamps samples with the monotonic
 `performance.now()` clock (immune to clock changes mid-recording) and
@@ -116,8 +121,11 @@ Stockwell → Brixton junction:
    (or via the **🏷️ Label & Train** button). The trip's feature vector
    is stored in localStorage.
 2. Once you have 5+ labeled examples of each platform, **🔮 Predict
-   Platform** classifies the current recording (k-nearest neighbours over
-   z-score-normalised time/frequency/asymmetry features).
+   Platform** classifies the current recording — k-nearest neighbours over
+   z-score-normalised, class-separation-weighted features. These include
+   the gravity-projected **world-frame yaw rate** (the rotation-rate
+   vector projected onto the vertical axis the gravity sensor reveals),
+   so the turn-direction signal survives any phone orientation.
 3. While recording, a **Live Platform Forecast** card re-predicts every
    5 seconds from the last 10 seconds of motion.
 

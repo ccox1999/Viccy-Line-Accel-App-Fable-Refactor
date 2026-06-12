@@ -30,7 +30,8 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
     return getNullFeatures();
   }
 
-  // Safety: clamp and validate all inputs
+  // Safety: clamp and validate all inputs.
+  // gx/gy/gz: gravity vector in device coords (may be absent in old data).
   const clean = motionWindow.map(s => ({
     ax: clamp(s.ax, -50, 50),
     ay: clamp(s.ay, -50, 50),
@@ -38,6 +39,9 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
     rotationAlpha: clamp(s.rotationAlpha, -360, 360),
     rotationBeta: clamp(s.rotationBeta, -360, 360),
     rotationGamma: clamp(s.rotationGamma, -360, 360),
+    gx: clamp(s.gx ?? 0, -30, 30),
+    gy: clamp(s.gy ?? 0, -30, 30),
+    gz: clamp(s.gz ?? 0, -30, 30),
   }));
 
   const n = clean.length;
@@ -80,6 +84,55 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   const rotMeanAlpha = mean(clean.map(s => s.rotationAlpha));
   const rotMeanBeta = mean(clean.map(s => s.rotationBeta));
   const rotMeanGamma = mean(clean.map(s => s.rotationGamma));
+
+  // ============ WORLD-FRAME (ORIENTATION-INVARIANT) FEATURES ============
+
+  // The per-axis features in this file live in DEVICE coordinates, so they
+  // change whenever the phone is held differently. The gravity vector
+  // (gx/gy/gz) tells us which way is down in device coordinates at every
+  // sample, which lets us reconstruct the physics regardless of orientation:
+  //
+  //  - WORLD YAW: project the rotation-rate vector onto the vertical axis.
+  //    A train taking the left fork rotates everything inside it about the
+  //    world's vertical — the phone included, however it's held. This is
+  //    THE physical left-vs-right signal. (Note rotationRate axis mapping:
+  //    alpha is rotation about device z, beta about x, gamma about y, so
+  //    the rotation vector in (x,y,z) order is (beta, gamma, alpha).)
+  //
+  //  - VERTICAL / HORIZONTAL ACCEL SPLIT: track roughness is vertical;
+  //    braking and cornering are horizontal — same split in any orientation.
+  //
+  // Samples without a plausible gravity magnitude (~9.81) are skipped, so
+  // old recordings that lack gx/gy/gz degrade gracefully to zeros.
+  let yawSum = 0;
+  let yawPeak = 0; // signed value with the largest magnitude
+  let vertSqSum = 0;
+  let horizSqSum = 0;
+  let validG = 0;
+  for (const s of clean) {
+    const gMag = Math.sqrt(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz);
+    if (gMag < 4 || gMag > 20) continue; // no usable gravity estimate
+    validG += 1;
+
+    // Vertical unit axis in device coords (sign convention is per-device
+    // consistent, which is all that matters for classification).
+    const ux = s.gx / gMag, uy = s.gy / gMag, uz = s.gz / gMag;
+
+    const yaw = s.rotationBeta * ux + s.rotationGamma * uy + s.rotationAlpha * uz;
+    yawSum += yaw;
+    if (Math.abs(yaw) > Math.abs(yawPeak)) yawPeak = yaw;
+
+    const vert = s.ax * ux + s.ay * uy + s.az * uz;
+    vertSqSum += vert * vert;
+    const hx = s.ax - vert * ux;
+    const hy = s.ay - vert * uy;
+    const hz = s.az - vert * uz;
+    horizSqSum += hx * hx + hy * hy + hz * hz;
+  }
+  const worldYawMean = validG > 0 ? yawSum / validG : 0;
+  const worldYawPeak = yawPeak;
+  const vertAccelRms = validG > 0 ? Math.sqrt(vertSqSum / validG) : 0;
+  const horizAccelRms = validG > 0 ? Math.sqrt(horizSqSum / validG) : 0;
 
   // ============ TIME-DOMAIN ROTATION FEATURES ============
 
@@ -137,6 +190,13 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
     rot_mean_alpha: rotMeanAlpha,
     rot_mean_beta: rotMeanBeta,
     rot_mean_gamma: rotMeanGamma,
+
+    // World-frame (orientation-invariant): signed heading-change rate +
+    // vertical/horizontal acceleration split
+    world_yaw_mean: worldYawMean,
+    world_yaw_peak: worldYawPeak,
+    vert_accel_rms: vertAccelRms,
+    horiz_accel_rms: horizAccelRms,
 
     // Acceleration: magnitude (overall intensity)
     accel_rms_x: accelRmsX,
@@ -441,6 +501,7 @@ function getNullFeatures() {
   const keys = [
     "accel_mean_x", "accel_mean_y", "accel_mean_z",
     "rot_mean_alpha", "rot_mean_beta", "rot_mean_gamma",
+    "world_yaw_mean", "world_yaw_peak", "vert_accel_rms", "horiz_accel_rms",
     "accel_rms_x", "accel_rms_y", "accel_rms_z", "accel_rms_total",
     "accel_peak_x", "accel_peak_y", "accel_peak_z",
     "accel_mag_rms", "accel_mag_peak", "accel_mag_mean",
