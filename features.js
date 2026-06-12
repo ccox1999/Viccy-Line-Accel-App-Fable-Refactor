@@ -68,6 +68,19 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   const accelMagPeak = Math.max(...accelMagnitudes);
   const accelMagMean = mean(accelMagnitudes);
 
+  // ============ SIGNED MEANS (directional — the left/right signal) ============
+
+  // Sustained centripetal acceleration through a curve and sustained yaw
+  // rate through a turn are SIGNED, DIRECTIONAL signals. Every other
+  // aggregate here (RMS, peak, energy, FFT magnitude) is sign-blind, so
+  // these means carry most of the left-vs-right information.
+  const accelMeanX = mean(clean.map(s => s.ax));
+  const accelMeanY = mean(clean.map(s => s.ay));
+  const accelMeanZ = mean(clean.map(s => s.az));
+  const rotMeanAlpha = mean(clean.map(s => s.rotationAlpha));
+  const rotMeanBeta = mean(clean.map(s => s.rotationBeta));
+  const rotMeanGamma = mean(clean.map(s => s.rotationGamma));
+
   // ============ TIME-DOMAIN ROTATION FEATURES ============
 
   // Per-axis RMS rotation
@@ -117,6 +130,14 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   // ============ COMPILE FEATURE VECTOR ============
 
   const features = {
+    // Signed means: directional bias (THE left-vs-right discriminators)
+    accel_mean_x: accelMeanX,
+    accel_mean_y: accelMeanY,
+    accel_mean_z: accelMeanZ,
+    rot_mean_alpha: rotMeanAlpha,
+    rot_mean_beta: rotMeanBeta,
+    rot_mean_gamma: rotMeanGamma,
+
     // Acceleration: magnitude (overall intensity)
     accel_rms_x: accelRmsX,
     accel_rms_y: accelRmsY,
@@ -418,6 +439,8 @@ function computeSpectralEntropy(magnitudes) {
  */
 function getNullFeatures() {
   const keys = [
+    "accel_mean_x", "accel_mean_y", "accel_mean_z",
+    "rot_mean_alpha", "rot_mean_beta", "rot_mean_gamma",
     "accel_rms_x", "accel_rms_y", "accel_rms_z", "accel_rms_total",
     "accel_peak_x", "accel_peak_y", "accel_peak_z",
     "accel_mag_rms", "accel_mag_peak", "accel_mag_mean",

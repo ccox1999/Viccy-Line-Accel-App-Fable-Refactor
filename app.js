@@ -284,44 +284,51 @@ async function loadMLModules() {
       const ml = await loadMLModules();
       await ensureTrainSet();
 
-      // Generate fake motion data (random noise)
-      const fakeMotion = Array(3000)
-        .fill(0)
-        .map(() => ({
-          time: performance.now() + Math.random() * 100,
-          ax: (Math.random() - 0.5) * 2,
-          ay: (Math.random() - 0.5) * 2,
-          az: (Math.random() - 0.5) * 2,
-          rotationAlpha: (Math.random() - 0.5) * 100,
-          rotationBeta: (Math.random() - 0.5) * 100,
-          rotationGamma: (Math.random() - 0.5) * 100,
-        }));
-
-      // Add 5 LEFT examples (negative Y-axis bias simulates left turn)
-      for (let i = 0; i < 5; i++) {
-        const leftMotion = fakeMotion.map((s) => ({
-          ...s,
-          ay: s.ay - 0.3,
-        }));
-        const leftFeatures = ml.features.extractFeatures(leftMotion, 60);
-        state.trainSet.add(leftFeatures, "left", { notes: `Fake left ${i}` });
+      // Re-tapping the button replaces previous FAKE examples instead of
+      // stacking duplicates. Real labeled trips are left untouched.
+      for (const ex of [...state.trainSet.examples]) {
+        if (ex.notes && ex.notes.startsWith("Fake")) {
+          state.trainSet.remove(ex.id);
+        }
       }
 
-      // Add 5 RIGHT examples (positive Y-axis bias simulates right turn)
-      for (let i = 0; i < 5; i++) {
-        const rightMotion = fakeMotion.map((s) => ({
-          ...s,
-          ay: s.ay + 0.3,
+      // Each fake trip mimics the physics of taking a fork: a SUSTAINED
+      // yaw rotation (rotationAlpha — spin about the screen-normal axis)
+      // plus a sustained lateral acceleration, buried in sensor noise.
+      // LEFT  = positive alpha (anticlockwise with the phone lying flat)
+      // RIGHT = negative alpha (clockwise)
+      // Fresh noise per example so the examples aren't co-located points.
+      const makeFakeTrip = (direction, turnRateDegPerSec) => {
+        const sign = direction === "left" ? 1 : -1;
+        return Array.from({ length: 3000 }, () => ({
+          ax: (Math.random() - 0.5) * 2,
+          ay: (Math.random() - 0.5) * 2 + sign * 0.3,
+          az: (Math.random() - 0.5) * 2,
+          rotationAlpha: (Math.random() - 0.5) * 30 + sign * turnRateDegPerSec,
+          rotationBeta: (Math.random() - 0.5) * 30,
+          rotationGamma: (Math.random() - 0.5) * 30,
         }));
-        const rightFeatures = ml.features.extractFeatures(rightMotion, 60);
-        state.trainSet.add(rightFeatures, "right", { notes: `Fake right ${i}` });
+      };
+
+      for (let i = 0; i < 5; i++) {
+        const turnRate = 30 + i * 4; // 30–46 °/s, varied per example
+        const left = ml.features.extractFeatures(makeFakeTrip("left", turnRate), 60);
+        state.trainSet.add(left, "left", { notes: `Fake left ${i}` });
+        const right = ml.features.extractFeatures(makeFakeTrip("right", turnRate), 60);
+        state.trainSet.add(right, "right", { notes: `Fake right ${i}` });
       }
 
       await state.trainSet.save();
 
       console.log("[ML] Generated 10 fake training examples");
       alert(
-        "✓ Created 10 fake training examples (5 left, 5 right)\n\nNow you can test:\n1. Record a motion\n2. Tap 'Predict Platform'"
+        "✓ Created 10 fake training examples (5 left, 5 right).\n\n" +
+          "To test: record ~10 seconds while holding the phone FLAT and " +
+          "slowly spinning it like a record.\n\n" +
+          "Spin anticlockwise → LEFT\nSpin clockwise → RIGHT\n\n" +
+          "(If your device's sign convention is mirrored you'll get the " +
+          "opposite labels — what matters is that the two spin directions " +
+          "give opposite, consistent answers.)"
       );
 
       await updateTrainingStatus();
