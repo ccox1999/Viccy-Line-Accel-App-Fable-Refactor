@@ -463,38 +463,19 @@ async function loadMLModules() {
   async function showLabelingDialog() {
     return new Promise((resolve) => {
       const modal = document.createElement("div");
-      modal.style.cssText = `
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0,0,0,0.8);
-        display: flex; align-items: flex-end; z-index: 9999;
-      `;
+      modal.className = "modal-overlay";
 
       const content = document.createElement("div");
-      content.style.cssText = `
-        background: #111318;
-        border-radius: 18px 18px 0 0;
-        padding: 24px;
-        width: 100%;
-        border: 1px solid #262833;
-        border-bottom: none;
-      `;
+      content.className = "modal-content";
 
       content.innerHTML = `
-        <h2 style="margin: 0 0 12px; font-size: 18px;">Label This Trip</h2>
-        <p style="margin: 0 0 16px; font-size: 14px; color: #a8adc2;">
-          Which platform did you arrive at?
-        </p>
-        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-          <button class="btn btn-primary" style="flex: 1;" data-answer="left">
-            ← LEFT
-          </button>
-          <button class="btn btn-primary" style="flex: 1;" data-answer="right">
-            RIGHT →
-          </button>
+        <h2 class="modal-title">Label This Trip</h2>
+        <p class="modal-subtitle">Which platform did you arrive at?</p>
+        <div class="modal-buttons">
+          <button class="btn btn-primary modal-btn" data-answer="left">← LEFT</button>
+          <button class="btn btn-primary modal-btn" data-answer="right">RIGHT →</button>
         </div>
-        <button class="btn btn-outline" style="width: 100%;" data-answer="skip">
-          Skip
-        </button>
+        <button class="btn btn-outline modal-btn-full" data-answer="skip">Skip</button>
       `;
 
       modal.appendChild(content);

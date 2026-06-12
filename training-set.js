@@ -36,10 +36,9 @@ export class TrainingSet {
   }
 
   /**
-   * Load training set from persistent storage (localStorage or IndexedDB).
+   * Load training set from persistent storage (localStorage).
    */
   async load() {
-    // Try localStorage first (simpler, synchronous)
     try {
       const stored = localStorage.getItem(this.storageKey);
       if (stored) {
@@ -52,46 +51,22 @@ export class TrainingSet {
       console.warn("[TrainingSet] localStorage load failed:", err);
     }
 
-    // Try IndexedDB (for larger sets)
-    try {
-      const data = await this.loadFromIndexedDB();
-      if (data) {
-        this.fromJSON(data);
-        console.log(`[TrainingSet] Loaded ${this.examples.length} examples from IndexedDB`);
-        return;
-      }
-    } catch (err) {
-      console.warn("[TrainingSet] IndexedDB load failed:", err);
-    }
-
     console.log("[TrainingSet] Starting with empty training set");
   }
 
   /**
-   * Save training set to persistent storage.
+   * Save training set to persistent storage (localStorage).
    */
   async save() {
     const json = this.toJSON();
     const jsonStr = JSON.stringify(json);
     const sizeKB = new Blob([jsonStr]).size / 1024;
 
-    // Use localStorage if small enough (typically ~5 MB quota per domain)
-    if (sizeKB < 500) {
-      try {
-        localStorage.setItem(this.storageKey, jsonStr);
-        console.log(`[TrainingSet] Saved ${this.examples.length} examples to localStorage (${sizeKB.toFixed(1)} KB)`);
-        return;
-      } catch (err) {
-        console.warn("[TrainingSet] localStorage save failed:", err);
-      }
-    }
-
-    // Use IndexedDB for larger sets
     try {
-      await this.saveToIndexedDB(json);
-      console.log(`[TrainingSet] Saved ${this.examples.length} examples to IndexedDB (${sizeKB.toFixed(1)} KB)`);
+      localStorage.setItem(this.storageKey, jsonStr);
+      console.log(`[TrainingSet] Saved ${this.examples.length} examples to localStorage (${sizeKB.toFixed(1)} KB)`);
     } catch (err) {
-      console.error("[TrainingSet] All storage failed:", err);
+      console.error("[TrainingSet] localStorage save failed:", err);
       throw err;
     }
   }
@@ -305,12 +280,6 @@ export class TrainingSet {
       localStorage.removeItem(this.storageKey);
     } catch (err) {
       console.warn("[TrainingSet] Failed to clear localStorage:", err);
-    }
-
-    try {
-      await this.saveToIndexedDB({ examples: [] });
-    } catch (err) {
-      console.warn("[TrainingSet] Failed to clear IndexedDB:", err);
     }
   }
 
