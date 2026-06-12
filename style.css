@@ -288,7 +288,7 @@ body {
 }
 
 .legend-item {
-  width: 26px;
+  width: 28px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -297,8 +297,8 @@ body {
 }
 
 .legend-item svg {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: block;
 }
 
@@ -309,24 +309,9 @@ body {
   line-height: 1;
 }
 
-/* Apply to all legend shapes */
-.legend-item svg * {
-  stroke: currentColor;
-  stroke-width: 1.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  fill: none;
-}
-
-.legend-item rect {
-  stroke-width: 1.6;
-}
-
-/* Z-axis arrows are filled triangles */
-.legend-item.az polygon {
-  fill: currentColor;
-  stroke: none;
-}
+/* Legend icon internals (stroke weights, ghost-phone opacity) are
+   self-contained inline SVG attributes; only the colour comes from
+   the classes below, via currentColor. */
 
 /* Series colours */
 .legend-item.ax    { color: var(--ax); }

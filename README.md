@@ -1,6 +1,6 @@
 # Victoria Line Motion Lab
 
-A mobile-first web app for recording and visualising your iPhone’s motion
+A mobile-first web app for recording and visualising your iPhone's motion
 sensors in real time — acceleration (m/s²) and rotation rate (°/s) — with
 one-tap export of the full session as JSON. Built for capturing tube-ride
 motion data on the Victoria line, but works anywhere your phone does.
@@ -23,12 +23,12 @@ The DeviceMotion permission API **only works over HTTPS** — opening
 HTTP. The easiest free option is GitHub Pages:
 
 1. Push this repository to GitHub.
-1. Open **Settings → Pages**.
-1. Under *Build and deployment*, choose **Deploy from a branch**, select
+2. Open **Settings → Pages**.
+3. Under *Build and deployment*, choose **Deploy from a branch**, select
    `main` and `/ (root)`, then save.
-1. After a minute, your app is live at
+4. After a minute, your app is live at
    `https://<username>.github.io/<repo-name>/`.
-1. Open that URL in Safari on your iPhone. For the full experience, tap
+5. Open that URL in Safari on your iPhone. For the full experience, tap
    **Share → Add to Home Screen** to install it as a standalone app.
 
 Any other HTTPS static host (Netlify, Cloudflare Pages, Vercel…) works
@@ -50,32 +50,32 @@ icon.
 
 1. **Enable Sensors** — triggers the iOS motion-permission prompt
    (required once per site on iOS 13+).
-1. **Start Recording** — charts begin scrolling; the status row shows a
+2. **Start Recording** — charts begin scrolling; the status row shows a
    pulsing red dot, live sample count, rate, and duration.
-1. **Stop Recording** — the session is held in memory and marked
-   “not saved yet”.
-1. **Save Data** — opens the share sheet on iPhone (save to Files,
+3. **Stop Recording** — the session is held in memory and marked
+   "not saved yet".
+4. **Save Data** — opens the share sheet on iPhone (save to Files,
    AirDrop to a Mac, etc.) or downloads a `.json` file elsewhere.
-1. **Clear** — discards the session (asks first if it’s unsaved).
+5. **Clear** — discards the session (asks first if it's unsaved).
 
 The in-memory buffer keeps the most recent **20,000 samples**
 (~5 minutes at 60 Hz). Older samples are trimmed and the sample count
-notes “(oldest trimmed)” when that happens.
+notes "(oldest trimmed)" when that happens.
 
 ## iOS permission troubleshooting
 
-If you tap **Don’t Allow** on the motion prompt, iOS **remembers the
+If you tap **Don't Allow** on the motion prompt, iOS **remembers the
 denial** and will not ask again on a normal reload. To get re-prompted:
 
 - Fully quit Safari (swipe it away in the app switcher) and reopen the
   page, **or**
-- Clear the site’s data: *Settings → Safari → Advanced → Website Data*,
+- Clear the site's data: *Settings → Safari → Advanced → Website Data*,
   find the site, and delete it.
 
 Also check *Settings → Safari → Motion & Orientation Access* is enabled
 (on older iOS versions this global switch must be on).
 
-If the status says “HTTPS required”, you’re viewing the page over plain
+If the status says "HTTPS required", you're viewing the page over plain
 HTTP or from a local file — see *Getting started* above.
 
 ## Export format
@@ -119,7 +119,7 @@ README.md      This file
 
 **When you edit any file, bump `CACHE_VERSION` in `sw.js`** (e.g.
 `motion-lab-v1` → `motion-lab-v2`) so returning visitors get the new
-version instead of the cached one. If you’d rather not deal with
+version instead of the cached one. If you'd rather not deal with
 caching at all, simply delete `sw.js` — the app detects its absence
 and runs normally, just without offline support.
 
