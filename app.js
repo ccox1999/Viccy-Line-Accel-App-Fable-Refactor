@@ -89,6 +89,7 @@ async function loadMLModules() {
       clearBtn: requireElement("clearBtn"),
       predictBtn: requireElement("predictBtn"),
       labelBtn: requireElement("labelBtn"),
+      generateTestDataBtn: requireElement("generateTestDataBtn"),
       sensorStatus: requireElement("sensorStatus"),
       sessionState: requireElement("sessionState"),
       sampleCount: requireElement("sampleCount"),
@@ -240,6 +241,68 @@ async function loadMLModules() {
   }
 
   // ---------- ML Platform Prediction (Phase 1 & 2) -------------------------
+
+  /**
+   * Generate fake training data for testing (10 examples: 5 left, 5 right).
+   * Useful for validating Phase 1 & 2 without needing real motion data.
+   */
+  async function generateFakeTrainingData() {
+    try {
+      ui.generateTestDataBtn.disabled = true;
+
+      if (!state.trainSet) {
+        state.trainSet = new (await loadMLModules()).trainingSet.TrainingSet();
+        await state.trainSet.load();
+      }
+
+      const ml = await loadMLModules();
+
+      // Generate fake motion data (random noise)
+      const fakeMotion = Array(3000)
+        .fill(0)
+        .map(() => ({
+          time: performance.now() + Math.random() * 100,
+          ax: (Math.random() - 0.5) * 2,
+          ay: (Math.random() - 0.5) * 2,
+          az: (Math.random() - 0.5) * 2,
+          rotationAlpha: (Math.random() - 0.5) * 100,
+          rotationBeta: (Math.random() - 0.5) * 100,
+          rotationGamma: (Math.random() - 0.5) * 100,
+        }));
+
+      // Add 5 LEFT examples (negative Y-axis bias simulates left turn)
+      for (let i = 0; i < 5; i++) {
+        const leftMotion = fakeMotion.map((s) => ({
+          ...s,
+          ay: s.ay - 0.3,
+        }));
+        state.trainSet.add(leftMotion, "left", { notes: `Fake left ${i}` });
+      }
+
+      // Add 5 RIGHT examples (positive Y-axis bias simulates right turn)
+      for (let i = 0; i < 5; i++) {
+        const rightMotion = fakeMotion.map((s) => ({
+          ...s,
+          ay: s.ay + 0.3,
+        }));
+        state.trainSet.add(rightMotion, "right", { notes: `Fake right ${i}` });
+      }
+
+      await state.trainSet.save();
+
+      console.log("[ML] Generated 10 fake training examples");
+      alert(
+        "✓ Created 10 fake training examples (5 left, 5 right)\n\nNow you can test:\n1. Record a motion\n2. Tap 'Predict Platform'"
+      );
+
+      await updateTrainingStatus();
+    } catch (err) {
+      console.error("[ML] Failed to generate fake data:", err);
+      alert(`Failed: ${err.message}`);
+    } finally {
+      ui.generateTestDataBtn.disabled = false;
+    }
+  }
 
   /**
    * Update the training status text to show current dataset size.
@@ -883,6 +946,10 @@ async function loadMLModules() {
     if (label && label !== "skip") {
       await labelAndSaveToTrainingSet(label);
     }
+  });
+
+  ui.generateTestDataBtn.addEventListener("click", () => {
+    generateFakeTrainingData();
   });
 
   // ---------- Save / export ------------------------------------------------
