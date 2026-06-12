@@ -414,34 +414,40 @@ async function loadMLModules() {
 
       // Show result in a card
       const resultCard = document.createElement("div");
-      resultCard.className = "card";
-      resultCard.innerHTML = `
-        <h3 style="margin: 0 0 12px;">Platform Prediction</h3>
-        <div style="text-align: center; padding: 12px 0;">
-          <div style="font-size: 32px; font-weight: bold; margin: 8px 0; color: ${
-            prediction.label === "left" ? "#ff375f" : "#32d74b"
-          }">
-            ${prediction.label.toUpperCase()}
-          </div>
-          <div style="font-size: 14px; color: #a8adc2; margin: 8px 0;">
-            Confidence: ${(prediction.confidence * 100).toFixed(0)}%
-          </div>
-          <div style="font-size: 12px; color: #6b7280;">
-            ${prediction.rawVotes.left} left / ${prediction.rawVotes.right} right neighbors
-          </div>
-        </div>
-        <button onclick="this.parentElement.remove()" style="
-          width: 100%;
-          padding: 8px;
-          margin-top: 8px;
-          background: #1c1f2b;
-          border: 1px solid #262833;
-          border-radius: 8px;
-          color: #f5f7ff;
-          cursor: pointer;
-          font-size: 14px;
-        ">Close</button>
-      `;
+      resultCard.className = "card prediction-result";
+
+      const title = document.createElement("h3");
+      title.className = "prediction-title";
+      title.textContent = "Platform Prediction";
+      resultCard.appendChild(title);
+
+      const body = document.createElement("div");
+      body.className = "prediction-body";
+
+      const platformDiv = document.createElement("div");
+      platformDiv.className = "prediction-platform";
+      platformDiv.textContent = prediction.label.toUpperCase();
+      platformDiv.style.color = prediction.label === "left" ? "#ff375f" : "#32d74b";
+      body.appendChild(platformDiv);
+
+      const confDiv = document.createElement("div");
+      confDiv.className = "prediction-confidence";
+      confDiv.textContent = `Confidence: ${(prediction.confidence * 100).toFixed(0)}%`;
+      body.appendChild(confDiv);
+
+      const votesDiv = document.createElement("div");
+      votesDiv.className = "prediction-votes";
+      votesDiv.textContent = `${prediction.rawVotes.left} left / ${prediction.rawVotes.right} right neighbors`;
+      body.appendChild(votesDiv);
+
+      resultCard.appendChild(body);
+
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "btn btn-outline prediction-close-btn";
+      closeBtn.textContent = "Close";
+      closeBtn.addEventListener("click", () => resultCard.remove());
+      resultCard.appendChild(closeBtn);
+
       document.querySelector(".app-shell").insertBefore(
         resultCard,
         document.querySelector(".chart-card")

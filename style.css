@@ -320,6 +320,45 @@ body {
   width: 100%;
 }
 
+/* Prediction result card (CSP-safe) */
+
+.prediction-result {
+  margin-top: 14px;
+}
+
+.prediction-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.prediction-body {
+  text-align: center;
+  padding: 12px 0;
+}
+
+.prediction-platform {
+  font-size: 32px;
+  font-weight: bold;
+  margin: 8px 0;
+}
+
+.prediction-confidence {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 8px 0;
+}
+
+.prediction-votes {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.prediction-close-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+
 /* Charts */
 
 .chart-header {
