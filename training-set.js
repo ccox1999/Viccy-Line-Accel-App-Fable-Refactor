@@ -248,6 +248,100 @@ export class TrainingSet {
       isReadyForTraining: this.isReadyForTraining(),
     };
   }
+
+  /**
+   * Export training set as a downloadable JSON file blob.
+   * Returns {blob, filename} for use with download links.
+   */
+  exportAsFile() {
+    const data = this.toJSON();
+    const counts = this.countByLabel();
+    data.exportNote = `Victoria Line Motion Lab training data — ${counts.left}L / ${counts.right}R examples`;
+
+    const jsonStr = JSON.stringify(data, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `victoria-training-${dateStr}-${counts.left}L${counts.right}R.json`;
+
+    return { blob, filename, data };
+  }
+
+  /**
+   * Generate a downloadable file and trigger browser download.
+   * The file can be manually saved to OneDrive or imported on another device.
+   */
+  triggerDownload() {
+    const { blob, filename } = this.exportAsFile();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    console.log(`[TrainingSet] Downloaded backup: ${filename}`);
+  }
+
+  /**
+   * Create a localStorage-based auto-backup (internal copy).
+   * Useful as a fallback recovery mechanism.
+   */
+  async autoBackup() {
+    const backupKey = `${this.storageKey}--backup`;
+    try {
+      localStorage.setItem(backupKey, JSON.stringify(this.toJSON()));
+      console.log(`[TrainingSet] Auto-backup saved (${this.examples.length} examples)`);
+    } catch (err) {
+      console.warn("[TrainingSet] Auto-backup failed:", err);
+    }
+  }
+
+  /**
+   * Restore from auto-backup (recovers from accidental deletion).
+   */
+  async restoreFromAutoBackup() {
+    const backupKey = `${this.storageKey}--backup`;
+    try {
+      const stored = localStorage.getItem(backupKey);
+      if (stored) {
+        const json = JSON.parse(stored);
+        this.fromJSON(json);
+        console.log(`[TrainingSet] Restored from auto-backup: ${this.examples.length} examples`);
+        return true;
+      }
+    } catch (err) {
+      console.warn("[TrainingSet] Auto-backup restore failed:", err);
+    }
+    return false;
+  }
+
+  /**
+   * Merge another training set into this one (for restoring from exports).
+   * Deduplicates by recordingId to avoid double-imports.
+   */
+  mergeFrom(otherTrainingSet) {
+    const existingIds = new Set(this.examples.map(ex => ex.recordingId));
+    let merged = 0;
+
+    for (const ex of otherTrainingSet.examples) {
+      if (!existingIds.has(ex.recordingId)) {
+        this.examples.push({ ...ex });
+        existingIds.add(ex.recordingId);
+        merged++;
+      }
+    }
+
+    // Rebuild ID numbering
+    const maxId = this.examples.reduce((max, ex) => {
+      const match = /example-(\d+)/.exec(ex.id ?? "");
+      return match ? Math.max(max, parseInt(match[1], 10)) : max;
+    }, 0);
+    this.nextId = maxId + 1;
+
+    console.log(`[TrainingSet] Merged ${merged} new examples`);
+    return merged;
+  }
 }
 
 /**

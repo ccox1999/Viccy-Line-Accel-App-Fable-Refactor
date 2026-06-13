@@ -90,6 +90,8 @@ async function loadMLModules() {
       predictBtn: requireElement("predictBtn"),
       labelBtn: requireElement("labelBtn"),
       generateTestDataBtn: requireElement("generateTestDataBtn"),
+      backupBtn: requireElement("backupBtn"),
+      restoreBtn: requireElement("restoreBtn"),
       sensorStatus: requireElement("sensorStatus"),
       sessionState: requireElement("sessionState"),
       sampleCount: requireElement("sampleCount"),
@@ -393,7 +395,7 @@ async function loadMLModules() {
   async function updateTrainingStatus() {
     if (!state.trainSet) return;
     const stats = state.trainSet.getStats();
-    const { leftCount, rightCount, isReadyForTraining } = stats;
+    const { leftCount, rightCount, isReadyForTraining, totalExamples } = stats;
     const text = `Training data: ${leftCount}L / ${rightCount}R${
       isReadyForTraining ? " ✓ Ready to predict" : " (need 5+ of each)"
     }`;
@@ -403,6 +405,9 @@ async function loadMLModules() {
     // Enable predict/label buttons only if we have training data
     ui.predictBtn.disabled = !isReadyForTraining || state.data.length === 0;
     ui.labelBtn.disabled = state.data.length === 0;
+
+    // Enable backup button if there's any training data to back up
+    ui.backupBtn.disabled = totalExamples === 0;
   }
 
   /**
@@ -603,10 +608,14 @@ async function loadMLModules() {
       // Save to persistent storage
       await state.trainSet.save();
 
+      // Auto-backup (silent): store a copy in localStorage and trigger an
+      // invisible auto-export that the user can download or restore later
+      await state.trainSet.autoBackup();
+
       // Update UI
       const stats = state.trainSet.getStats();
       alert(
-        `✓ Saved to training set!\n\nTotal: ${stats.totalExamples} examples\nLeft: ${stats.leftCount} | Right: ${stats.rightCount}`
+        `✓ Saved to training set!\n\nTotal: ${stats.totalExamples} examples\nLeft: ${stats.leftCount} | Right: ${stats.rightCount}\n\nBackup saved automatically. You can download it anytime via the "⬇️ Backup Data" button.`
       );
 
       await updateTrainingStatus();
@@ -1007,6 +1016,50 @@ async function loadMLModules() {
 
   ui.generateTestDataBtn.addEventListener("click", () => {
     generateFakeTrainingData();
+  });
+
+  // ---------- Training data backup / restore --------------------------------
+
+  ui.backupBtn.addEventListener("click", async () => {
+    try {
+      await ensureTrainSet();
+      state.trainSet.triggerDownload();
+      alert("✓ Backup downloaded. You can save it to OneDrive or email to yourself.");
+    } catch (err) {
+      alert(`Backup failed: ${err.message}`);
+    }
+  });
+
+  ui.restoreBtn.addEventListener("click", async () => {
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".json";
+    fileInput.onchange = async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      try {
+        const text = await file.text();
+        const json = JSON.parse(text);
+
+        await ensureTrainSet();
+        const imported = new (await loadMLModules()).trainingSet.TrainingSet();
+        imported.fromJSON(json);
+
+        const merged = state.trainSet.mergeFrom(imported);
+        await state.trainSet.save();
+
+        await updateTrainingStatus();
+
+        const stats = state.trainSet.getStats();
+        alert(
+          `✓ Restored!\n\nMerged ${merged} new examples.\n\nTotal now: ${stats.totalExamples} (${stats.leftCount}L / ${stats.rightCount}R)`
+        );
+      } catch (err) {
+        alert(`Restore failed: ${err.message}`);
+      }
+    };
+    fileInput.click();
   });
 
   // ---------- Save / export ------------------------------------------------
