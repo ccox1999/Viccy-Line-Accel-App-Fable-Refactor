@@ -79,13 +79,16 @@ works until the number says so.
 
 ## Console helpers
 
+The app runs inside an IIFE, so its state is exposed for debugging under the
+`motionLab` global:
+
 ```javascript
 // Counts and stats
-state.trainSet?.getStats();
+motionLab.state.trainSet?.getStats();
 
 // Inspect one stored example (features + raw motion)
-state.trainSet.examples[0];
+motionLab.state.trainSet.examples[0];
 
 // Export the whole training set as JSON
-JSON.stringify(state.trainSet.toJSON());
+JSON.stringify(motionLab.state.trainSet.toJSON());
 ```

@@ -1,17 +1,21 @@
 # Victoria Line Motion Lab
 
-A mobile-first web app for recording and visualising your iPhone's motion
-sensors in real time — acceleration (m/s²) and rotation rate (°/s) — with
-one-tap export of the full session as JSON. Built for capturing tube-ride
-motion data on the Victoria line, but works anywhere your phone does.
+A mobile-first web app for recording your iPhone's motion sensors on the
+Victoria line — acceleration (m/s²) and rotation rate (°/s) — and learning to
+predict which of Brixton's two platforms a train is heading for. Built for the
+tube, but the recorder works anywhere your phone does.
 
 ## Features
 
 - Live scrolling charts of acceleration (X/Y/Z) and rotation rate (α/β/γ)
 - iOS 13+ motion-permission flow with a clear visual status pill
 - Live sample count, sample rate (Hz), and recording duration
-- Export via the native iOS share sheet (Files, AirDrop, Mail…) with a
-  classic download fallback on other platforms
+- Zero-friction training loop: **record → stop → label → done**, with each
+  labelled trip auto-saved to localStorage (features + full raw motion)
+- On-device k-NN platform prediction with a live forecast while recording and
+  an honest cross-validated accuracy estimate after each label
+- Manual JSON backup / restore (save to OneDrive, email, or move to another
+  device) as the durable safety net
 - Installable PWA with offline support (works with no signal on the tube)
 - Safe-area aware layout (notch / Dynamic Island / home indicator),
   landscape support, and battery-friendly sensor + render lifecycle
@@ -48,17 +52,26 @@ icon.
 
 ## Using the app
 
-1. **Enable Sensors** — triggers the iOS motion-permission prompt
+1. **Enable Motion Sensors** — triggers the iOS motion-permission prompt
    (required once per site on iOS 13+).
 2. **Start Recording** — charts begin scrolling; the status row shows a
-   pulsing red dot, live sample count, rate, and duration.
-3. **Stop Recording** — the session is held in memory and marked
-   "not saved yet".
-4. **Save Data** — opens the share sheet on iPhone (save to Files,
-   AirDrop to a Mac, etc.) or downloads a `.json` file elsewhere.
-5. **Clear** — discards the session (asks first if it's unsaved).
+   pulsing red dot, live sample count, rate, and duration. With ≥5 labelled
+   trips of each platform, a **Live Platform Forecast** card updates every
+   ~5 s.
+3. **Stop Recording** — a labelling sheet appears: **← LEFT / RIGHT → / Skip**.
+4. Pick the platform you actually arrived at. The trip's features **and**
+   full raw motion are saved to localStorage automatically, an internal
+   auto-backup is written, and an alert shows the new totals plus an
+   estimated accuracy (once there are ≥5 of each side).
+5. **Clear** — discards an unlabelled session (asks first).
 
-The in-memory buffer keeps the most recent **20,000 samples**
+Maintenance actions live under **Data & tools**: **⬇️ Backup Data** /
+**⬆️ Restore Data** (JSON import/export, deduped by recording on restore) and
+**🧪 Test Data** (seed 10 fake examples to exercise the flow without real
+trips). Past trips are listed in the **Recordings History** panel, where each
+can be deleted.
+
+The in-memory recording buffer keeps the most recent **20,000 samples**
 (~5 minutes at 60 Hz). Older samples are trimmed and the sample count
 notes "(oldest trimmed)" when that happens.
 
@@ -78,9 +91,10 @@ Also check *Settings → Safari → Motion & Orientation Access* is enabled
 If the status says "HTTPS required", you're viewing the page over plain
 HTTP or from a local file — see *Getting started* above.
 
-## Export format
+## Raw motion sample format
 
-Exports are a flat JSON array, one object per sample:
+A backup file (**⬇️ Backup Data**) is a training-set JSON whose examples each
+carry a `rawMotionData` array — one object per motion sample, in this shape:
 
 ```json
 [
@@ -91,7 +105,10 @@ Exports are a flat JSON array, one object per sample:
     "az": 0.1872,
     "rotationAlpha": 1.25,
     "rotationBeta": -0.4,
-    "rotationGamma": 0.02
+    "rotationGamma": 0.02,
+    "gx": 0.12,
+    "gy": -9.78,
+    "gz": 0.63
   }
 ]
 ```
@@ -117,17 +134,18 @@ Beyond raw recording, the app can learn to predict which of Brixton's two
 platforms a train is heading for, from the vibration signature of the
 Stockwell → Brixton junction:
 
-1. Record a trip, then label it **left** or **right** when prompted
-   (or via the **🏷️ Label & Train** button). The trip's feature vector
-   is stored in localStorage.
-2. Once you have 5+ labeled examples of each platform, **🔮 Predict
-   Platform** classifies the current recording — k-nearest neighbours over
-   z-score-normalised, class-separation-weighted features. These include
-   the gravity-projected **world-frame yaw rate** (the rotation-rate
-   vector projected onto the vertical axis the gravity sensor reveals),
-   so the turn-direction signal survives any phone orientation.
+1. Record a trip, then label it **left** or **right** on the sheet that
+   appears when you stop. The trip's feature vector and raw motion are
+   stored in localStorage.
+2. Once you have 5+ labelled examples of each platform, the classifier is
+   live: k-nearest neighbours over z-score-normalised,
+   class-separation-weighted features. These include the gravity-projected
+   **world-frame yaw rate** (the rotation-rate vector projected onto the
+   vertical axis the gravity sensor reveals), so the turn-direction signal
+   survives any phone orientation.
 3. While recording, a **Live Platform Forecast** card re-predicts every
-   5 seconds from the last 10 seconds of motion.
+   5 seconds from the last 10 seconds of motion. A borderline call shows
+   **"Not sure"** rather than committing to a coin-flip.
 
 The **🧪 Test Data** button seeds 10 fake examples so the flow can be
 tested without real trips. See `TESTING.md` and `ML-INTEGRATION-GUIDE.md`.

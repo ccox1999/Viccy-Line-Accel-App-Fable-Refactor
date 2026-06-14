@@ -602,8 +602,16 @@ async function loadMLModules() {
       // Extract features from the recording (lightweight storage)
       const features = ml.features.extractFeatures(state.data, 60);
 
-      // Add features + full raw motion data to training set
-      const durationSec = state.data.length > 0 ? (state.data[state.data.length - 1].time / 1000).toFixed(1) : "0";
+      // Add features + full raw motion data to training set.
+      // `.time` is an absolute performance.now() value, so the recording's
+      // elapsed length is (last − start), not last on its own (that would be
+      // seconds-since-page-load — the bug that put 200s+ durations in history).
+      const lastSample = state.data[state.data.length - 1];
+      const elapsedMs =
+        state.data.length > 0 && state.startTime != null
+          ? lastSample.time - state.startTime
+          : 0;
+      const durationSec = (elapsedMs / 1000).toFixed(1);
       const rawMotionData = state.data.map((s) => ({
         time: Math.round(state.epochBase + s.time),
         ax: s.ax,
@@ -948,6 +956,10 @@ async function loadMLModules() {
     state.recording = true;
     state.lastPredictionAt = 0;
     state.lastLivePrediction = null;
+    // Force a classifier rebuild for this trip. count() alone misses the case
+    // where the training set changed but its size didn't (e.g. delete one,
+    // add one, or re-seed test data) since the last live forecast.
+    state.classifierBuiltFor = -1;
 
     // Attach only while recording: a permanently-attached devicemotion
     // listener keeps iOS sensors powered and drains the battery even idle.
@@ -1159,6 +1171,13 @@ async function loadMLModules() {
     } catch (err) {
       console.warn("[ML] Failed to load training set:", err);
     }
+  }
+
+  // Debug handle: the app runs inside an IIFE, so `state` isn't otherwise
+  // reachable from the console. Exposed read-side only for the helpers
+  // documented in TESTING.md (e.g. `motionLab.state.trainSet.getStats()`).
+  if (typeof window !== "undefined") {
+    window.motionLab = { state };
   }
 
   init();

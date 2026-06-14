@@ -14,7 +14,7 @@
 - `classifier.js`: k-NN (k=5) with z-score normalization (stdDev floored at 0.01) + Fisher-style class-separation weighting (only engaged when ≥3 examples per class, else uniform). `predict()` takes an optional `minConfidence`; the live forecast uses 0.6 so a 3/2 split shows "Not sure" instead of a coin-flip.
 - Accuracy is estimated honestly via repeated (15×) held-out cross-validation after each label, shown in the save alert once there are ≥5 examples per class.
 - `training-set.js`: v3 format stores features + raw motion data + metadata per example.
-- Service worker cache (v10): offline support via app-shell pattern. (Bump on every edit.)
+- Service worker cache (v12): offline support via app-shell pattern, now incl. icons. (Bump on every edit.)
 - PWA-ready: installable to home screen, better storage persistence than bookmarked URL.
 
 **ML caveats / open questions:**

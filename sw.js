@@ -11,7 +11,7 @@
 
 "use strict";
 
-const CACHE_VERSION = "motion-lab-v11";
+const CACHE_VERSION = "motion-lab-v12";
 
 // Everything the app needs to boot with no network at all.
 const APP_SHELL = [
@@ -23,6 +23,9 @@ const APP_SHELL = [
   "./classifier.js",
   "./training-set.js",
   "./manifest.json",
+  "./icon-192.png",
+  "./icon-512.png",
+  "./apple-touch-icon.png",
 ];
 
 // Install: pre-cache the shell, then activate immediately rather than

@@ -363,8 +363,15 @@ export function evaluateCrossValidation(
     return { error: "Not enough examples for cross-validation" };
   }
 
-  // Shuffle and split
-  const shuffled = [...data].sort(() => Math.random() - 0.5);
+  // Shuffle (unbiased Fisher-Yates) and split. A `.sort(() => Math.random()
+  // - 0.5)` shuffle is NOT uniform — comparator-based shuffles leave elements
+  // correlated with their start position, which skews the held-out split and
+  // therefore the accuracy estimate.
+  const shuffled = [...data];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
   const splitIdx = Math.ceil(shuffled.length * (1 - testFraction));
   const trainData = shuffled.slice(0, splitIdx);
   const testData = shuffled.slice(splitIdx);

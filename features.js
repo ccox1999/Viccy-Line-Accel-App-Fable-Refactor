@@ -70,16 +70,16 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   ]);
 
   // Per-axis peak magnitude
-  const accelPeakX = Math.max(...clean.map(s => Math.abs(s.ax)));
-  const accelPeakY = Math.max(...clean.map(s => Math.abs(s.ay)));
-  const accelPeakZ = Math.max(...clean.map(s => Math.abs(s.az)));
+  const accelPeakX = maxVal(clean.map(s => Math.abs(s.ax)));
+  const accelPeakY = maxVal(clean.map(s => Math.abs(s.ay)));
+  const accelPeakZ = maxVal(clean.map(s => Math.abs(s.az)));
 
   // Vector magnitude of acceleration (distance from origin in 3D space)
   const accelMagnitudes = clean.map(s =>
     Math.sqrt(s.ax ** 2 + s.ay ** 2 + s.az ** 2)
   );
   const accelMagRms = rms(accelMagnitudes);
-  const accelMagPeak = Math.max(...accelMagnitudes);
+  const accelMagPeak = maxVal(accelMagnitudes);
   const accelMagMean = mean(accelMagnitudes);
 
   // ============ SIGNED MEANS (directional — the left/right signal) ============
@@ -152,9 +152,9 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   const rotGammaRms = rms(clean.map(s => s.rotationGamma));
 
   // Per-axis peak rotation
-  const rotAlphaPeak = Math.max(...clean.map(s => Math.abs(s.rotationAlpha)));
-  const rotBetaPeak = Math.max(...clean.map(s => Math.abs(s.rotationBeta)));
-  const rotGammaPeak = Math.max(...clean.map(s => Math.abs(s.rotationGamma)));
+  const rotAlphaPeak = maxVal(clean.map(s => Math.abs(s.rotationAlpha)));
+  const rotBetaPeak = maxVal(clean.map(s => Math.abs(s.rotationBeta)));
+  const rotGammaPeak = maxVal(clean.map(s => Math.abs(s.rotationGamma)));
 
   // ============ JERK (derivative of acceleration) ============
 
@@ -318,6 +318,22 @@ export function extractFeaturesWindowed(
 // ============================================================
 // HELPER FUNCTIONS
 // ============================================================
+
+/**
+ * Largest element of an array, via a loop.
+ *
+ * Deliberately NOT `Math.max(...arr)`: that spreads every element as a
+ * function argument, and a full recording window can hold tens of thousands
+ * of samples — enough to exceed the engine's argument-count limit (a hard
+ * RangeError on Safari/JSC) on a long trip. Returns 0 for an empty array.
+ */
+function maxVal(arr) {
+  let m = -Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] > m) m = arr[i];
+  }
+  return m === -Infinity ? 0 : m;
+}
 
 /**
  * Clamped RMS (root mean square).
