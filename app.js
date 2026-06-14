@@ -85,7 +85,6 @@ async function loadMLModules() {
     ui = {
       sensorBtn: requireElement("sensorBtn"),
       recordBtn: requireElement("recordBtn"),
-      saveBtn: requireElement("saveBtn"),
       clearBtn: requireElement("clearBtn"),
       predictBtn: requireElement("predictBtn"),
       labelBtn: requireElement("labelBtn"),
@@ -656,13 +655,27 @@ async function loadMLModules() {
       // Extract features from the recording (lightweight storage)
       const features = ml.features.extractFeatures(state.data, 60);
 
-      // Add features (not raw motion data) to training set
+      // Add features + full raw motion data to training set
       const durationSec = state.data.length > 0 ? (state.data[state.data.length - 1].time / 1000).toFixed(1) : "0";
+      const rawMotionData = state.data.map((s) => ({
+        time: Math.round(state.epochBase + s.time),
+        ax: s.ax,
+        ay: s.ay,
+        az: s.az,
+        rotationAlpha: s.rotationAlpha,
+        rotationBeta: s.rotationBeta,
+        rotationGamma: s.rotationGamma,
+        gx: s.gx ?? 0,
+        gy: s.gy ?? 0,
+        gz: s.gz ?? 0,
+      }));
+
       state.trainSet.add(features, label, {
         recordingId: ml.trainingSet.generateRecordingId(),
         timestamp: Date.now(),
         sampleCount: state.data.length,
         duration: parseFloat(durationSec),
+        rawMotionData, // full raw motion data for this recording
         notes: `User-labeled ${label} platform`,
       });
 
@@ -1000,7 +1013,6 @@ async function loadMLModules() {
     ui.recordBtn.classList.add("btn-danger");
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
     setSessionState("Recording\u2026");
-    ui.saveBtn.disabled = true;
     ui.clearBtn.disabled = true;
     ui.predictBtn.disabled = true;
     ui.labelBtn.disabled = true;
@@ -1035,9 +1047,7 @@ async function loadMLModules() {
     ui.liveForcastCard.classList.add("hidden");
 
     const hasData = state.data.length > 0;
-    state.unsaved = hasData;
-    setSessionState(hasData ? "Recorded \u2014 not saved yet" : "Idle");
-    ui.saveBtn.disabled = !hasData;
+    setSessionState(hasData ? "Recorded" : "Idle");
     ui.clearBtn.disabled = !hasData;
 
     // Update predict/label button states
@@ -1135,68 +1145,6 @@ async function loadMLModules() {
     }
   });
 
-  // ---------- Save / export ------------------------------------------------
-
-  ui.saveBtn.addEventListener("click", async () => {
-    if (!state.data.length) return;
-    ui.saveBtn.disabled = true; // block double-taps while the share sheet is up
-
-    try {
-      // Same schema as the original export: a flat array with epoch-ms times.
-      // Compact JSON: ~60% smaller than pretty-printed for 20k samples.
-      const samples = state.data.map((s) => ({
-        time: Math.round(state.epochBase + s.time),
-        ax: s.ax,
-        ay: s.ay,
-        az: s.az,
-        rotationAlpha: s.rotationAlpha,
-        rotationBeta: s.rotationBeta,
-        rotationGamma: s.rotationGamma,
-        gx: s.gx ?? 0,
-        gy: s.gy ?? 0,
-        gz: s.gz ?? 0,
-      }));
-      const json = JSON.stringify(samples);
-      const fileName = `motion-recording-${timestampForFilename()}.json`;
-
-      // Preferred path on iPhone: the native share sheet (Files, AirDrop,
-      // Mail…). <a download> is unreliable in iOS Safari and broken in
-      // standalone home-screen apps.
-      const file = new File([json], fileName, { type: "application/json" });
-      if (navigator.canShare?.({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], title: "Motion recording" });
-          state.unsaved = false;
-          setSessionState("Saved");
-          return;
-        } catch (err) {
-          if (err?.name === "AbortError") return; // user closed the sheet
-          console.warn("[MotionLab] Share failed, falling back to download:", err);
-        }
-      }
-
-      // Fallback: classic download.
-      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = fileName;
-      anchor.rel = "noopener";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      // Revoking immediately after click() can race the download in some
-      // browsers — give it a moment.
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-
-      state.unsaved = false;
-      setSessionState("Saved");
-    } catch (err) {
-      console.error("[MotionLab] Save failed:", err);
-      setSessionState("Save failed \u2014 see console");
-    } finally {
-      ui.saveBtn.disabled = state.data.length === 0;
-    }
-  });
 
   // ---------- Clear --------------------------------------------------------
 
@@ -1211,7 +1159,6 @@ async function loadMLModules() {
     state.dataTrimmed = false;
     state.unsaved = false;
     setSessionState("Idle");
-    ui.saveBtn.disabled = true;
     ui.clearBtn.disabled = true;
     updateSessionInfo();
     scheduleRender();

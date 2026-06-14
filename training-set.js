@@ -153,10 +153,11 @@ export class TrainingSet {
 
   /**
    * Export training set as JSON (portable format).
+   * Now includes full raw motion data for each recording.
    */
   toJSON() {
     return {
-      version: 2, // v2: examples carry `features`, not raw `motionData`
+      version: 3, // v3: examples carry full rawMotionData + features
       storageKey: this.storageKey,
       exportTimestamp: Date.now(),
       examples: this.examples.map(ex => ({
@@ -165,6 +166,9 @@ export class TrainingSet {
         label: ex.label,
         timestamp: ex.timestamp,
         recordingId: ex.recordingId,
+        sampleCount: ex.sampleCount,
+        duration: ex.duration,
+        rawMotionData: ex.rawMotionData, // full recording data
         notes: ex.notes,
       })),
     };
@@ -172,9 +176,8 @@ export class TrainingSet {
 
   /**
    * Import training set from JSON.
-   * Examples without a features object (e.g. from an old v1 export that
-   * stored raw motion data) are skipped with a warning — they can't be
-   * used for prediction.
+   * Handles v2 (features only) and v3 (features + rawMotionData) formats.
+   * Examples without a features object (v1 format) are skipped with a warning.
    */
   fromJSON(json) {
     if (!json.examples || !Array.isArray(json.examples)) {
@@ -191,6 +194,9 @@ export class TrainingSet {
           label: ex.label,
           timestamp: ex.timestamp,
           recordingId: ex.recordingId,
+          sampleCount: ex.sampleCount,
+          duration: ex.duration,
+          rawMotionData: ex.rawMotionData, // may be undefined for v2 imports
           notes: ex.notes ?? "",
         });
       } else {
