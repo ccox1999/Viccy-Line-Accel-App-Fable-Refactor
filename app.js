@@ -86,8 +86,6 @@ async function loadMLModules() {
       sensorBtn: requireElement("sensorBtn"),
       recordBtn: requireElement("recordBtn"),
       clearBtn: requireElement("clearBtn"),
-      predictBtn: requireElement("predictBtn"),
-      labelBtn: requireElement("labelBtn"),
       generateTestDataBtn: requireElement("generateTestDataBtn"),
       backupBtn: requireElement("backupBtn"),
       restoreBtn: requireElement("restoreBtn"),
@@ -404,10 +402,6 @@ async function loadMLModules() {
     ui.trainingStatus.textContent = text;
     ui.trainingStatus.classList.remove("hidden");
 
-    // Enable predict/label buttons only if we have training data
-    ui.predictBtn.disabled = !isReadyForTraining || state.data.length === 0;
-    ui.labelBtn.disabled = state.data.length === 0;
-
     // Enable backup button if there's any training data to back up
     ui.backupBtn.disabled = totalExamples === 0;
 
@@ -520,84 +514,6 @@ async function loadMLModules() {
   /**
    * Phase 1: Post-hoc prediction after recording stops.
    */
-  async function predictPlatform() {
-    if (!state.trainSet || state.trainSet.count() < 5) {
-      alert(
-        `Need at least 5 labeled examples to predict. Currently have ${state.trainSet?.count() ?? 0}.`
-      );
-      return;
-    }
-
-    if (state.data.length === 0) {
-      alert("No recording to analyze.");
-      return;
-    }
-
-    try {
-      ui.predictBtn.disabled = true;
-      const ml = await loadMLModules();
-
-      // Extract features
-      const features = ml.features.extractFeatures(state.data, 60);
-
-      // Build classifier and predict
-      const clf = await buildClassifier();
-      const prediction = clf.predict(features);
-      if (!prediction.label) {
-        alert("No usable training examples found — add some labeled trips first.");
-        return;
-      }
-
-      // Show result in a card
-      const resultCard = document.createElement("div");
-      resultCard.className = "card prediction-result";
-
-      const title = document.createElement("h3");
-      title.className = "prediction-title";
-      title.textContent = "Platform Prediction";
-      resultCard.appendChild(title);
-
-      const body = document.createElement("div");
-      body.className = "prediction-body";
-
-      const platformDiv = document.createElement("div");
-      platformDiv.className = `prediction-platform platform-${prediction.label}`;
-      platformDiv.textContent = prediction.label.toUpperCase();
-      body.appendChild(platformDiv);
-
-      const confDiv = document.createElement("div");
-      confDiv.className = "prediction-confidence";
-      confDiv.textContent = `Confidence: ${(prediction.confidence * 100).toFixed(0)}%`;
-      body.appendChild(confDiv);
-
-      const votesDiv = document.createElement("div");
-      votesDiv.className = "prediction-votes";
-      votesDiv.textContent = `${prediction.rawVotes.left} left / ${prediction.rawVotes.right} right neighbors`;
-      body.appendChild(votesDiv);
-
-      resultCard.appendChild(body);
-
-      const closeBtn = document.createElement("button");
-      closeBtn.className = "btn btn-outline prediction-close-btn";
-      closeBtn.textContent = "Close";
-      closeBtn.addEventListener("click", () => resultCard.remove());
-      resultCard.appendChild(closeBtn);
-
-      document.querySelector(".app-shell").insertBefore(
-        resultCard,
-        document.querySelector(".chart-card")
-      );
-
-      hapticTick(20);
-    } catch (err) {
-      console.error("[ML] Prediction failed:", err);
-      alert(`Prediction failed: ${err.message}`);
-    } finally {
-      ui.predictBtn.disabled =
-        !state.trainSet?.isReadyForTraining() || state.data.length === 0;
-    }
-  }
-
   /**
    * Show a modal to label the current recording.
    */
@@ -647,8 +563,6 @@ async function loadMLModules() {
     if (label === "skip" || !["left", "right"].includes(label)) return;
 
     try {
-      ui.labelBtn.disabled = true;
-
       const ml = await loadMLModules();
       await ensureTrainSet();
 
@@ -696,8 +610,6 @@ async function loadMLModules() {
     } catch (err) {
       console.error("[ML] Save to training set failed:", err);
       alert(`Failed to save: ${err.message}`);
-    } finally {
-      ui.labelBtn.disabled = state.data.length === 0;
     }
   }
 
@@ -1014,8 +926,6 @@ async function loadMLModules() {
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
     setSessionState("Recording\u2026");
     ui.clearBtn.disabled = true;
-    ui.predictBtn.disabled = true;
-    ui.labelBtn.disabled = true;
 
     // Show live forecast card (Phase 2), reset to its waiting state
     ui.liveForcastCard.classList.remove("hidden");
@@ -1070,19 +980,6 @@ async function loadMLModules() {
   ui.recordBtn.addEventListener("click", () => {
     if (state.recording) stopRecording();
     else startRecording();
-  });
-
-  // ---------- ML Platform Prediction (buttons) ------
-
-  ui.predictBtn.addEventListener("click", () => {
-    predictPlatform();
-  });
-
-  ui.labelBtn.addEventListener("click", async () => {
-    const label = await showLabelingDialog();
-    if (label && label !== "skip") {
-      await labelAndSaveToTrainingSet(label);
-    }
   });
 
   ui.generateTestDataBtn.addEventListener("click", () => {
