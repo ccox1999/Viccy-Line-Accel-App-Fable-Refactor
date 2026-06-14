@@ -9,11 +9,17 @@
 **UI (streamlined):** Record → Stop → Auto-prompt to label → Done. Data visible in collapsible history panel with delete per-recording. Test Data button for development. Backup/Restore buttons for manual export/import.
 
 **Key implementation details:**
-- `features.js`: 25+ features including signed means, world-frame yaw/pitch/roll, trajectory curvature, jerk (vertical vs horizontal)
-- `classifier.js`: k-NN with z-score normalization per feature, Fisher-style class-separation weighting
-- `training-set.js`: v3 format stores features + raw motion data + metadata per example
-- Service worker cache (v9): offline support via app-shell pattern
-- PWA-ready: installable to home screen, better storage persistence than bookmarked URL
+- `features.js`: ~25 features. The orientation-invariant left/right signal is `world_yaw_mean/peak` + `vert_accel_rms`/`horiz_accel_rms`, computed by projecting each sample onto the per-sample gravity vector (no integration → no drift). Plus device-frame time/frequency/statistical features (RMS, peak, skew, jerk, FFT bins, spectral entropy) that Fisher weighting down-weights when phone orientation varies between trips.
+- **REMOVED (do not re-add):** a full "inertial navigation / trajectory reconstruction" block (gyro→rotation-matrix integration + double-integrated position, with traj_curvature/range and world-frame jerk features). Its matrix update was mathematically wrong (corrupted R after step 1), and even corrected, doubly-integrated accelerometer position is a drift-dominated random walk — those features were noise. The gravity-projection features above are the correct way to get orientation invariance.
+- `classifier.js`: k-NN (k=5) with z-score normalization (stdDev floored at 0.01) + Fisher-style class-separation weighting (only engaged when ≥3 examples per class, else uniform). `predict()` takes an optional `minConfidence`; the live forecast uses 0.6 so a 3/2 split shows "Not sure" instead of a coin-flip.
+- Accuracy is estimated honestly via repeated (15×) held-out cross-validation after each label, shown in the save alert once there are ≥5 examples per class.
+- `training-set.js`: v3 format stores features + raw motion data + metadata per example.
+- Service worker cache (v10): offline support via app-shell pattern. (Bump on every edit.)
+- PWA-ready: installable to home screen, better storage persistence than bookmarked URL.
+
+**ML caveats / open questions:**
+- The underlying physical signal (which Brixton fork the train takes) is small and brief — a gentle low-speed switch near the terminus. `world_yaw` is the most likely discriminator. Real-world accuracy is unproven; the CV estimate after labeling is the source of truth.
+- Device-frame features only help if the phone is held consistently across trips; Fisher weighting is what's supposed to suppress them otherwise, but on tiny datasets that weighting is itself noisy. Fewer/better features may beat the current ~25-dim set — worth revisiting once real data exists.
 
 ---
 

@@ -30,8 +30,11 @@
  *   // pred = { label: "left", confidence: 0.87, neighbors: [...] }
  */
 export class KNNClassifier {
-  constructor(k = 5) {
+  constructor(k = 5, minConfidence = 0) {
     this.k = k;
+    // Predictions at or below this fraction of the vote are reported as
+    // label:null (undecided) rather than a near-coin-flip guess. 0 disables.
+    this.minConfidence = minConfidence;
     this.examples = []; // [{features, label, recordingId, timestamp}, ...]
     this._normCache = null; // { stats, vectors } — rebuilt lazily after changes
   }
@@ -149,6 +152,17 @@ export class KNNClassifier {
       confidence = Math.max(leftDist, rightDist) / (leftDist + rightDist || 1);
     }
 
+    // Suppress low-confidence guesses (e.g. a 3/2 split on k=5 → 0.6).
+    if (this.minConfidence > 0 && confidence < this.minConfidence) {
+      return {
+        label: null,
+        confidence,
+        neighbors,
+        rawVotes: votes,
+        error: `Low confidence (${(confidence * 100).toFixed(0)}%)`,
+      };
+    }
+
     return {
       label,
       confidence,
@@ -213,7 +227,10 @@ export class KNNClassifier {
         const d = (ex.features[key] ?? 0) - mean;
         sumSq += d * d;
       }
-      stats[key] = { mean, stdDev: Math.sqrt(sumSq / n) };
+      // Floor the stdDev so a near-constant feature (tiny variance from a
+      // couple of noisy samples) can't be amplified into a dominant axis
+      // when normalized. Zero variance still maps to 0 in _normalize().
+      stats[key] = { mean, stdDev: Math.max(0.01, Math.sqrt(sumSq / n)) };
     }
 
     const vectors = this.examples.map((ex) => this._normalize(ex.features, stats));
@@ -233,7 +250,10 @@ export class KNNClassifier {
       else if (ex.label === "right") rightIdx.push(i);
     });
 
-    if (leftIdx.length > 0 && rightIdx.length > 0) {
+    // Fisher weighting needs a few examples of EACH class to estimate
+    // within-class spread; with 1–2 it just chases that one point's noise.
+    // Below the threshold, fall back to uniform weights (plain z-scored k-NN).
+    if (leftIdx.length >= 3 && rightIdx.length >= 3) {
       const classStats = (idxs, key) => {
         let total = 0;
         for (const i of idxs) total += vectors[i][key] ?? 0;
@@ -265,7 +285,7 @@ export class KNNClassifier {
         for (const key in weights) weights[key] = 1;
       }
     } else {
-      // Only one class present — uniform weights.
+      // Too few examples per class to weight reliably — uniform weights.
       for (const key in stats) weights[key] = 1;
     }
 

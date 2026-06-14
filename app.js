@@ -264,7 +264,10 @@ async function loadMLModules() {
   async function buildClassifier() {
     const ml = await loadMLModules();
     const trainSet = await ensureTrainSet();
-    const clf = new ml.classifier.KNNClassifier(5);
+    // Live forecast only commits to a platform at ≥60% of the vote
+    // (a 4/1 split on k=5), so a borderline 3/2 shows as "Not sure" instead
+    // of a near-coin-flip guess.
+    const clf = new ml.classifier.KNNClassifier(5, 0.6);
     for (const ex of trainSet.examples) {
       if (!ex.features || typeof ex.features !== "object") continue;
       clf.addTrainingExample(ex.features, ex.label, {
@@ -273,6 +276,33 @@ async function loadMLModules() {
       });
     }
     return clf;
+  }
+
+  /**
+   * Honest accuracy estimate: average held-out accuracy over several random
+   * splits (single-split CV is too noisy on tiny sets). Returns null until
+   * there are enough examples of each class for the estimate to mean anything.
+   */
+  function estimateAccuracy(ml, examples) {
+    const usable = examples.filter(
+      (ex) => ex.features && typeof ex.features === "object"
+    );
+    const counts = { left: 0, right: 0 };
+    for (const ex of usable) if (ex.label in counts) counts[ex.label]++;
+    if (counts.left < 5 || counts.right < 5) return null;
+
+    const data = usable.map((ex) => ({ features: ex.features, label: ex.label }));
+    const REPEATS = 15;
+    let sum = 0;
+    let valid = 0;
+    for (let i = 0; i < REPEATS; i++) {
+      const m = ml.classifier.evaluateCrossValidation(data, 5, 0.25);
+      if (m && Number.isFinite(m.accuracy)) {
+        sum += m.accuracy;
+        valid++;
+      }
+    }
+    return valid > 0 ? sum / valid : null;
   }
 
   /**
@@ -493,8 +523,19 @@ async function loadMLModules() {
 
       // Predict
       const prediction = state.classifier.predict(features);
-      if (!prediction.label) return; // no usable training examples
       state.lastLivePrediction = prediction;
+
+      // Low confidence (or no usable examples): say so rather than commit to
+      // a coin-flip. prediction.label is null when the confidence gate trips.
+      if (!prediction.label) {
+        ui.forecastPlatform.textContent = "Not sure";
+        ui.forecastPlatform.classList.remove("platform-left", "platform-right");
+        ui.forecastConfidence.textContent = prediction.confidence
+          ? `Confidence: ${(prediction.confidence * 100).toFixed(0)}% (too low)`
+          : "Confidence: —";
+        ui.forecastNote.textContent = `${prediction.rawVotes.left}/${prediction.rawVotes.right} neighbors`;
+        return;
+      }
 
       // Update UI (colour via class — the CSP forbids style attributes)
       ui.forecastPlatform.textContent = prediction.label.toUpperCase();
@@ -602,8 +643,23 @@ async function loadMLModules() {
 
       // Update UI
       const stats = state.trainSet.getStats();
+
+      // Honest accuracy estimate via repeated cross-validation, so the user
+      // knows whether the classifier actually works rather than guessing.
+      let accuracyLine = "";
+      const cvAccuracy = estimateAccuracy(ml, state.trainSet.examples);
+      if (cvAccuracy !== null) {
+        const pct = (cvAccuracy * 100).toFixed(0);
+        accuracyLine =
+          cvAccuracy >= 0.75
+            ? `\n\nEstimated accuracy: ${pct}% ✓`
+            : `\n\n⚠️ Estimated accuracy: ${pct}% — collect more (and more varied) trips to improve it.`;
+      } else {
+        accuracyLine = `\n\n(Need ~5+ of each side before an accuracy estimate is meaningful.)`;
+      }
+
       alert(
-        `✓ Saved to training set!\n\nTotal: ${stats.totalExamples} examples\nLeft: ${stats.leftCount} | Right: ${stats.rightCount}\n\nBackup saved automatically. You can download it anytime via the "⬇️ Backup Data" button.`
+        `✓ Saved to training set!\n\nTotal: ${stats.totalExamples} examples\nLeft: ${stats.leftCount} | Right: ${stats.rightCount}${accuracyLine}\n\nBackup saved automatically — download anytime via "⬇️ Backup Data".`
       );
 
       await updateTrainingStatus();

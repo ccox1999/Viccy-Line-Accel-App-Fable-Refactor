@@ -47,164 +47,15 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   const n = clean.length;
   const dt = 1 / sampleRateHz;
 
-  // ============ INERTIAL NAVIGATION (TRAJECTORY RECONSTRUCTION) ============
-
-  // Orientation tracking via gyro integration. Start from gravity to find
-  // device-to-world rotation, then integrate gyro to track orientation changes.
-  // Output: world-frame acceleration, trajectory, and shape features.
-
-  // Initial orientation from gravity: which device axis points down?
-  let R = null; // 3×3 rotation matrix: row = device x/y/z axis in world coords
-  let validGravityCount = 0;
-  for (const s of clean) {
-    const gMag = Math.hypot(s.gx, s.gy, s.gz);
-    if (gMag >= 4 && gMag <= 20) {
-      if (!R) {
-        // First plausible gravity: use it to initialize. The gravity vector
-        // is the world-Z (down) in device coordinates.
-        const uz = [s.gx / gMag, s.gy / gMag, s.gz / gMag]; // world -Z in device coords
-        // Orthonormal basis: ux arbitrary perpendicular, uy = uz × ux.
-        const ux =
-          Math.abs(uz[0]) < 0.9
-            ? normalize([1, 0, 0])
-            : normalize([0, 1, 0]);
-        const uy = cross(uz, ux);
-        const ux2 = cross(uy, uz);
-        R = [ux2, uy, uz]; // rows = device axes in world coords
-      }
-      validGravityCount++;
-    }
-  }
-  if (!R) {
-    // No gravity estimate: assume device was upright initially (y points down)
-    R = [[1, 0, 0], [0, 0, -1], [0, 1, 0]];
-  }
-
-  // Integrate gyro to track orientation. Update R incrementally at each
-  // sample, then convert acceleration to world frame.
-  const worldAccel = [];
-  const worldVelocity = [[0, 0, 0]]; // integrated acceleration
-  const worldTrajectory = [[0, 0, 0]]; // integrated velocity
-  let cumulativeYaw = 0;
-  let cumulativePitch = 0;
-  let cumulativeRoll = 0;
-
-  for (let i = 0; i < n; i++) {
-    const s = clean[i];
-
-    // Infinitesimal rotation: dR = skew(ω × dt) × R
-    const wx = (s.rotationBeta * Math.PI) / 180; // convert °/s to rad/s
-    const wy = (s.rotationGamma * Math.PI) / 180;
-    const wz = (s.rotationAlpha * Math.PI) / 180;
-    const ang = Math.hypot(wx, wy, wz) * dt;
-    if (ang > 1e-6) {
-      const axis = [wx / ang, wy / ang, wz / ang];
-      const c = Math.cos(ang / 2);
-      const s_ = Math.sin(ang / 2);
-      const q = [
-        c,
-        axis[0] * s_,
-        axis[1] * s_,
-        axis[2] * s_,
-      ]; // quaternion [w, x, y, z]
-      // R := quat_to_matrix(q) × R
-      R = quatToMatrix(q).map((row) =>
-        row.map(
-          (v, j) =>
-            R[0][j] * v +
-            R[1][j] * row[1] +
-            R[2][j] * row[2]
-        )
-      ); // simplified; proper matmul
-    }
-
-    // Cumulative angles (Euler-angle style, for feature extraction)
-    cumulativeYaw += wz * dt;
-    cumulativePitch += wy * dt;
-    cumulativeRoll += wx * dt;
-
-    // World-frame acceleration = R × device-accel
-    const aDevice = [s.ax, s.ay, s.az];
-    const aWorld = [
-      R[0][0] * aDevice[0] +
-        R[0][1] * aDevice[1] +
-        R[0][2] * aDevice[2],
-      R[1][0] * aDevice[0] +
-        R[1][1] * aDevice[1] +
-        R[1][2] * aDevice[2],
-      R[2][0] * aDevice[0] +
-        R[2][1] * aDevice[1] +
-        R[2][2] * aDevice[2],
-    ];
-    worldAccel.push(aWorld);
-
-    // Integrate: v += a×dt, x += v×dt
-    const v = [
-      worldVelocity[i][0] + aWorld[0] * dt,
-      worldVelocity[i][1] + aWorld[1] * dt,
-      worldVelocity[i][2] + aWorld[2] * dt,
-    ];
-    worldVelocity.push(v);
-    const x = [
-      worldTrajectory[i][0] + v[0] * dt,
-      worldTrajectory[i][1] + v[1] * dt,
-      worldTrajectory[i][2] + v[2] * dt,
-    ];
-    worldTrajectory.push(x);
-  }
-
-  // Trajectory shape features (invariant to position origin, revealing of fork)
-  let trajCurvatureMean = 0;
-  let trajCurvaturePeak = 0;
-  for (let i = 1; i < worldVelocity.length - 1; i++) {
-    const v = worldVelocity[i];
-    const vMag = Math.hypot(...v);
-    if (vMag < 0.01) continue;
-    const dv = [
-      worldVelocity[i + 1][0] - v[0],
-      worldVelocity[i + 1][1] - v[1],
-      worldVelocity[i + 1][2] - v[2],
-    ];
-    const curvature = Math.hypot(...dv) / (vMag * dt); // lateral acceleration / speed
-    trajCurvatureMean += curvature;
-    trajCurvaturePeak = Math.max(trajCurvaturePeak, curvature);
-  }
-  trajCurvatureMean /= Math.max(worldVelocity.length - 2, 1);
-
-  // Trajectory extent: how far did the phone move?
-  const trajXRange = Math.max(...worldTrajectory.map(p => p[0])) - Math.min(...worldTrajectory.map(p => p[0]));
-  const trajYRange = Math.max(...worldTrajectory.map(p => p[1])) - Math.min(...worldTrajectory.map(p => p[1]));
-  const trajZRange = Math.max(...worldTrajectory.map(p => p[2])) - Math.min(...worldTrajectory.map(p => p[2]));
-  const trajHorizRange = Math.hypot(trajXRange, trajYRange);
-  const trajVertRange = trajZRange;
-
-  // Jerk: d/dt of acceleration (high jerk = bumpy, distinctive per track)
-  const jerkWorld = [];
-  for (let i = 1; i < worldAccel.length; i++) {
-    const dA = [
-      worldAccel[i][0] - worldAccel[i - 1][0],
-      worldAccel[i][1] - worldAccel[i - 1][1],
-      worldAccel[i][2] - worldAccel[i - 1][2],
-    ];
-    jerkWorld.push(Math.hypot(...dA) / dt);
-  }
-  const jerkRms = rms(jerkWorld);
-  const jerkPeak = Math.max(...jerkWorld);
-
-  // Vertical vs horizontal jerk (track roughness is vertical; cornering is lateral)
-  const jerkVert = [];
-  const jerkHoriz = [];
-  for (let i = 1; i < worldAccel.length; i++) {
-    const jVert = (worldAccel[i][2] - worldAccel[i - 1][2]) / dt;
-    const jH = Math.hypot(
-      worldAccel[i][0] - worldAccel[i - 1][0],
-      worldAccel[i][1] - worldAccel[i - 1][1]
-    ) / dt;
-    jerkVert.push(Math.abs(jVert));
-    jerkHoriz.push(jH);
-  }
-  const jerkVertRms = rms(jerkVert);
-  const jerkHorizRms = rms(jerkHoriz);
+  // NOTE: An earlier version reconstructed a full 3D trajectory here by
+  // integrating the gyro into a rotation matrix and double-integrating
+  // acceleration into position. That was removed because (1) the matrix
+  // update was incorrect, corrupting the rotation after the first step, and
+  // (2) even done correctly, doubly-integrated accelerometer data is a
+  // random walk dominated by drift, so "trajectory range/curvature" features
+  // carry noise, not signal. The orientation-invariant left/right signal is
+  // captured directly and correctly by the WORLD-FRAME features below
+  // (per-sample gravity projection — no integration, no drift).
 
   // ============ TIME-DOMAIN ACCELERATION FEATURES ============
 
@@ -351,24 +202,13 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
     rot_mean_gamma: rotMeanGamma,
 
     // World-frame (orientation-invariant): signed heading-change rate +
-    // vertical/horizontal acceleration split
+    // vertical/horizontal acceleration split. This is the physically sound
+    // left/right discriminator — computed by projecting each sample onto the
+    // gravity vector, with no integration and therefore no drift.
     world_yaw_mean: worldYawMean,
     world_yaw_peak: worldYawPeak,
     vert_accel_rms: vertAccelRms,
     horiz_accel_rms: horizAccelRms,
-
-    // Inertial trajectory: shape and geometry of the 3D path the phone took
-    traj_curvature_mean: trajCurvatureMean,
-    traj_curvature_peak: trajCurvaturePeak,
-    traj_horiz_range: trajHorizRange,
-    traj_vert_range: trajVertRange,
-    jerk_rms: jerkRms,
-    jerk_peak: jerkPeak,
-    jerk_vert_rms: jerkVertRms,
-    jerk_horiz_rms: jerkHorizRms,
-    gyro_cumul_yaw: cumulativeYaw,
-    gyro_cumul_pitch: cumulativePitch,
-    gyro_cumul_roll: cumulativeRoll,
 
     // Acceleration: magnitude (overall intensity)
     accel_rms_x: accelRmsX,
@@ -674,9 +514,6 @@ function getNullFeatures() {
     "accel_mean_x", "accel_mean_y", "accel_mean_z",
     "rot_mean_alpha", "rot_mean_beta", "rot_mean_gamma",
     "world_yaw_mean", "world_yaw_peak", "vert_accel_rms", "horiz_accel_rms",
-    "traj_curvature_mean", "traj_curvature_peak", "traj_horiz_range", "traj_vert_range",
-    "jerk_rms", "jerk_peak", "jerk_vert_rms", "jerk_horiz_rms",
-    "gyro_cumul_yaw", "gyro_cumul_pitch", "gyro_cumul_roll",
     "accel_rms_x", "accel_rms_y", "accel_rms_z", "accel_rms_total",
     "accel_peak_x", "accel_peak_y", "accel_peak_z",
     "accel_mag_rms", "accel_mag_peak", "accel_mag_mean",
@@ -762,36 +599,4 @@ export function computeFeatureStats(featureVectors) {
   }
 
   return stats;
-}
-
-/**
- * Convert a unit quaternion [w, x, y, z] to a 3×3 rotation matrix.
- * Used by inertial navigation to update orientation from gyro rotation rate.
- */
-function quatToMatrix(q) {
-  const [w, x, y, z] = q;
-  return [
-    [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-  ];
-}
-
-/**
- * 3D cross product: a × b.
- */
-function cross(a, b) {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-/**
- * Normalize a 3D vector to unit length.
- */
-function normalize(v) {
-  const mag = Math.hypot(v[0], v[1], v[2]);
-  return mag > 0 ? [v[0] / mag, v[1] / mag, v[2] / mag] : v;
 }
