@@ -92,6 +92,9 @@ async function loadMLModules() {
       generateTestDataBtn: requireElement("generateTestDataBtn"),
       backupBtn: requireElement("backupBtn"),
       restoreBtn: requireElement("restoreBtn"),
+      historyCard: requireElement("recordingsList").parentElement,
+      recordingsList: requireElement("recordingsList"),
+      toggleHistoryBtn: requireElement("toggleHistoryBtn"),
       sensorStatus: requireElement("sensorStatus"),
       sessionState: requireElement("sessionState"),
       sampleCount: requireElement("sampleCount"),
@@ -408,6 +411,61 @@ async function loadMLModules() {
 
     // Enable backup button if there's any training data to back up
     ui.backupBtn.disabled = totalExamples === 0;
+
+    // Show/update recordings history if there's training data
+    if (totalExamples > 0) {
+      ui.historyCard.classList.remove("hidden");
+      renderRecordingsList();
+    } else {
+      ui.historyCard.classList.add("hidden");
+    }
+  }
+
+  function renderRecordingsList() {
+    if (!state.trainSet || state.trainSet.count() === 0) {
+      ui.recordingsList.innerHTML = "<p style='text-align: center; color: var(--text-muted); margin: 0;'>No recordings yet</p>";
+      return;
+    }
+
+    // Sort by timestamp, newest first
+    const sorted = [...state.trainSet.examples].sort((a, b) => b.timestamp - a.timestamp);
+
+    ui.recordingsList.innerHTML = sorted.map((ex, idx) => {
+      const date = new Date(ex.timestamp);
+      const timeStr = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const dateStr = date.toLocaleDateString([], { month: "short", day: "numeric" });
+      const durationStr = ex.duration ? `${ex.duration}s` : "—";
+      const labelClass = ex.label === "left" ? "recording-label-left" : "recording-label-right";
+      const labelEmoji = ex.label === "left" ? "←" : "→";
+
+      return `
+        <div class="recording-item">
+          <div class="recording-info">
+            <div class="recording-label ${labelClass}">
+              ${labelEmoji} ${ex.label.toUpperCase()}
+            </div>
+            <div class="recording-timestamp">${dateStr} at ${timeStr}</div>
+          </div>
+          <div class="recording-duration">${durationStr}</div>
+          <button type="button" class="recording-delete" data-id="${ex.id}" title="Delete this recording">
+            ✕
+          </button>
+        </div>
+      `;
+    }).join("");
+
+    // Wire up delete buttons
+    ui.recordingsList.querySelectorAll(".recording-delete").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        const id = e.target.dataset.id;
+        if (window.confirm("Delete this recording?")) {
+          state.trainSet.remove(id);
+          state.trainSet.save().then(() => {
+            updateTrainingStatus();
+          });
+        }
+      });
+    });
   }
 
   /**
@@ -599,9 +657,12 @@ async function loadMLModules() {
       const features = ml.features.extractFeatures(state.data, 60);
 
       // Add features (not raw motion data) to training set
+      const durationSec = state.data.length > 0 ? (state.data[state.data.length - 1].time / 1000).toFixed(1) : "0";
       state.trainSet.add(features, label, {
         recordingId: ml.trainingSet.generateRecordingId(),
         timestamp: Date.now(),
+        sampleCount: state.data.length,
+        duration: parseFloat(durationSec),
         notes: `User-labeled ${label} platform`,
       });
 
@@ -1060,6 +1121,18 @@ async function loadMLModules() {
       }
     };
     fileInput.click();
+  });
+
+  // Toggle history card collapse
+  ui.toggleHistoryBtn.addEventListener("click", () => {
+    const isCollapsed = ui.recordingsList.classList.contains("hidden");
+    if (isCollapsed) {
+      ui.recordingsList.classList.remove("hidden");
+      ui.toggleHistoryBtn.textContent = "−";
+    } else {
+      ui.recordingsList.classList.add("hidden");
+      ui.toggleHistoryBtn.textContent = "+";
+    }
   });
 
   // ---------- Save / export ------------------------------------------------
