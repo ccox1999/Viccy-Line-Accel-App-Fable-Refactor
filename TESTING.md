@@ -1,287 +1,91 @@
-# Testing Guide — Victoria Line Motion Lab ML Integration
+# Testing Guide — Victoria Line Motion Lab
 
-Both Phase 1 and Phase 2 are now integrated and ready to test. Here's how to validate the implementation.
+How to validate the app end to end. The flow is intentionally tiny:
+**record → stop → label → done.** Everything else (saving, prediction,
+backup) happens automatically or lives under **Data & tools**.
 
-## Quick Start
+## 1. Open over HTTPS
 
-1. **Deploy to HTTPS** (required for DeviceMotion API):
-   ```bash
-   # GitHub Pages (easiest)
-   git push origin main
-   # Then visit: https://<username>.github.io/<repo>/
-   
-   # Or local testing with HTTPS (use a tool like:)
-   # - ngrok: ngrok http 3000
-   # - localhost.run: (doesn't require signing up)
-   # - or any HTTPS tunnel / local server
-   ```
+DeviceMotion only works on HTTPS. Easiest is GitHub Pages:
 
-2. **Open on iPhone in Safari** (or any HTTPS-capable phone)
-3. **Tap "Add to Home Screen"** to install as PWA (optional but recommended)
+```bash
+git push origin main
+# then visit https://<username>.github.io/<repo>/
+```
 
-## Phase 1: Post-Hoc Prediction Testing
+On iPhone, open in Safari or Chrome and tap **Share → Add to Home Screen**
+to install it as a PWA (better sensor permissions and far more durable
+local storage than a bookmarked tab).
 
-**Goal:** Test the predict button after recording a trip.
+## 2. Seed test data (no real trips needed)
 
-### Setup (once)
+Open **Data & tools → 🧪 Test Data**. It creates 10 fake examples
+(5 left, 5 right) whose world-frame turn direction is the only consistent
+signal, expressed in a random phone orientation per example — i.e. the same
+structure as real trips. Re-tapping replaces the fake examples; real
+labeled trips are left untouched.
 
-1. **Tap the "🧪 Test Data" button** in the app's controls section.
-   It generates 10 fake training examples (5 left, 5 right) — no console needed.
+After tapping you should see the training status line update to
+`Training data: 5L / 5R …` and the **Recordings History** panel appear.
 
-2. You should see:
-   - An alert confirming the examples were created
-   - Training status: `Training data: 5L / 5R ✓ Ready to predict`
-   - "🏷️ Label & Train" and "🔮 Predict Platform" enabled once a recording exists
+## 3. Record and label a trip
 
-### Test Steps
+1. **Enable Motion Sensors** (one-time iOS permission prompt).
+2. **Start Recording** — charts scroll; a **Live Platform Forecast** card
+   appears. With ≥5 of each class it updates every ~5 s; a borderline call
+   shows **“Not sure”** rather than a coin-flip.
+3. **Stop Recording** — a labeling sheet appears: **← LEFT / RIGHT → / Skip**.
+4. Pick the platform you actually arrived at. The trip’s features **and**
+   full raw motion data are saved to localStorage, an internal auto-backup
+   is written, and an alert shows the new totals plus an **estimated
+   accuracy** (once you have ≥5 of each side).
 
-1. **Record a short motion**:
-   - Tap "Enable Motion Sensors"
-   - Tap "Start Recording"
-   - Shake your phone or move it around for ~3 seconds
-   - Tap "Stop Recording"
+That’s the whole loop. Nothing else needs saving.
 
-2. **Predict the platform**:
-   - Tap "🔮 Predict Platform"
-   - You should see a result card pop up with:
-     - Platform: LEFT or RIGHT
-     - Confidence: 60–100%
-     - Neighbor votes: e.g., "5/0"
-   - This is Phase 1 working! ✓
+### Checklist
+- [ ] Labeling sheet appears on stop (LEFT / RIGHT / Skip all work)
+- [ ] Save alert shows updated counts and, with enough data, an accuracy %
+- [ ] Recordings History lists the new trip (label, date/time, duration)
+- [ ] Deleting a recording from History updates counts and persists
+- [ ] Data survives a full reload (and app close, if installed as a PWA)
 
-3. **Close the result and try again** with different motions to see confidence change
+## 4. Backup / restore (Data & tools)
 
-### Validation Checklist
+- **⬇️ Backup Data** downloads `victoria-training-YYYY-MM-DD-NLxxRyy.json`
+  (features + raw motion). Save it to OneDrive or email it to yourself.
+- **⬆️ Restore Data** imports such a file and **merges** it in, deduped by
+  `recordingId` — importing the same file twice does not duplicate.
 
-- [ ] "Predict Platform" button is disabled before recording (or if training set is empty)
-- [ ] "Predict Platform" button is enabled after recording stops (with training data)
-- [ ] Prediction result shows within 1–2 seconds
-- [ ] Result card shows platform, confidence, and neighbor breakdown
-- [ ] Predictions are consistent (same input → same output)
-- [ ] Different motions show different confidence levels
+## 5. Real Victoria line data
 
----
+Collect ~15–20 trips each direction, varying time of day, seat, and phone
+placement. Label each by the platform you actually arrived at. Watch the
+estimated-accuracy figure in the save alert: below 75% it warns you to
+collect more varied examples. The cross-validation number is the source of
+truth for whether the classifier actually works — the underlying physical
+signal (which Brixton fork the train takes) is small, so don’t assume it
+works until the number says so.
 
-## Phase 2: Live Streaming Prediction Testing
+## Troubleshooting
 
-**Goal:** Test the live forecast card that updates during recording.
+- **“Not sure” a lot:** confidence is below 60% — collect more varied data.
+- **Forecast never updates:** needs ≥5 of each class and ≥~0.5 s of motion;
+  check the console for `[ML] Live prediction failed`.
+- **Data missing after reload:** check DevTools → Application → Local Storage
+  for `victoria-line-training-set`. Note storage is per-origin, so a
+  different URL or a private window starts empty. Installing as a PWA makes
+  storage much more durable.
+- **No accuracy estimate:** you need ≥5 examples of *each* side first.
 
-### Test Steps
-
-1. **Start a recording**:
-   - Tap "Start Recording"
-   - You should see a new "Live Platform Forecast" card appear below the rotation chart
-   - It shows:
-     - Platform: `—` (dash)
-     - Confidence: `—`
-     - Note: "Waiting for data…"
-
-2. **Let it collect data**:
-   - Keep the phone still for ~8 seconds (gives the app enough samples)
-   - Watch the live forecast card
-
-3. **After ~8 seconds**, the card should update to show:
-   - Platform: LEFT or RIGHT
-   - Confidence: e.g., "Confidence: 87%"
-   - Note: e.g., "3/2 neighbors"
-
-4. **Move/shake the phone**:
-   - The platform prediction might change
-   - Confidence updates every 5 seconds
-
-5. **Stop recording**:
-   - Tap "Stop Recording"
-   - The live forecast card should disappear
-   - You should see the labeling offer
-
-### Validation Checklist
-
-- [ ] Live forecast card appears when recording starts
-- [ ] Card disappears when recording stops
-- [ ] Platform shows `—` initially, updates after ~8 seconds
-- [ ] Confidence percentage updates approximately every 5 seconds
-- [ ] Different movements produce different predictions
-- [ ] No errors in browser console
-
----
-
-## Training Data Management Testing
-
-**Goal:** Test the label/train workflow.
-
-### Test Steps
-
-1. **Record a trip** and stop recording
-
-2. **A dialog should appear** asking:
-   - "Label this trip to add to your training set?"
-   - OK = yes, Cancel = skip
-
-3. **Tap OK**, then select a platform:
-   - Modal appears with:
-     - "Which platform did you arrive at?"
-     - "← LEFT" button
-     - "RIGHT →" button
-     - "Skip" button
-
-4. **Tap LEFT or RIGHT**:
-   - You should see an alert: `✓ Saved to training set!`
-   - Shows total count: `Total: 11 examples, Left: 6 | Right: 5`
-   - Training status updates below the controls
-
-5. **Record and label a few more** trips to build a balanced dataset (aim for 5+ of each)
-
-### Validation Checklist
-
-- [ ] Labeling dialog appears after recording stops (if training data exists)
-- [ ] Buttons: LEFT, RIGHT, Skip all work
-- [ ] Alert shows success + updated count
-- [ ] Training status text updates
-- [ ] Predict button remains enabled after labeling
-- [ ] Multiple labels are retained across page reloads (persisted to storage)
-
----
-
-## Real Victoria Line Testing
-
-**Goal:** Collect real training data and validate predictions on actual Stockwell→Brixton trips.
-
-### Data Collection Plan
-
-1. **Collect 20+ real trips** (10+ each direction):
-   - Take 5–10 rides to Brixton, label each as left or right
-   - Vary: time of day, seat position, phone placement
-   - Record the full trip (Stockwell to Brixton ~10 min)
-
-2. **After each trip**:
-   - Labeling dialog appears
-   - Select the actual platform you arrived at
-   - (You can see physical platform signs or check TfL app)
-
-3. **Once you have 50+ examples**, evaluate:
-   ```javascript
-   (async () => {
-     const { TrainingSet } = await import('./training-set.js');
-     const { evaluateCrossValidation } = await import('./classifier.js');
-     
-     const trainSet = new TrainingSet();
-     await trainSet.load();
-     
-     const data = trainSet.examples.map(ex => ({
-       features: ex.features,
-       label: ex.label
-     }));
-     
-     const metrics = evaluateCrossValidation(data, k = 5, testFraction = 0.2);
-     console.log('Metrics:', metrics);
-     console.log('Accuracy:', (metrics.accuracy * 100).toFixed(1) + '%');
-   })();
-   ```
-
-   Expected: 70–95% accuracy
-
-### Troubleshooting
-
-**Issue: "Predict Platform" button stays disabled**
-- Make sure you have at least 5 examples of each platform (left AND right)
-- Check browser console for errors
-- Try: `trainSet.getStats()` in console to see current counts
-
-**Issue: Predictions always show same answer**
-- Might not have enough training variety
-- Try collecting examples in different conditions
-- Check raw training data: `trainSet.examples[0]` in console
-
-**Issue: Live forecast never updates during recording**
-- Needs at least 30 samples (~0.5 seconds of data)
-- Updates every 5 seconds
-- Check console for errors: `[ML] Live prediction failed`
-
-**Issue: Training data disappears after reload**
-- Check DevTools → Application → Local Storage
-- Should see key: `victoria-line-training-set`
-- Check DevTools → Console for storage errors
-- Note: training data is stored per-origin — a different URL (or
-  incognito window) starts with an empty set
-
----
-
-## Console Debugging
-
-Open DevTools (F12) and paste these for debugging:
+## Console helpers
 
 ```javascript
-// Check app state
-console.log('Training set count:', state.trainSet?.count());
-console.log('Training stats:', state.trainSet?.getStats());
+// Counts and stats
+state.trainSet?.getStats();
 
-// Check feature extraction
-const { extractFeatures } = await import('./features.js');
-const features = extractFeatures(state.data, 60);
-console.log('Features:', features);
+// Inspect one stored example (features + raw motion)
+state.trainSet.examples[0];
 
-// Check classifier
-console.log('Current prediction:', state.lastLivePrediction);
-
-// Export training set as JSON (for backup)
-const json = state.trainSet.toJSON();
-console.log(JSON.stringify(json, null, 2));
-
-// Import training set from JSON
-state.trainSet.fromJSON(json);
-await state.trainSet.save();
+// Export the whole training set as JSON
+JSON.stringify(state.trainSet.toJSON());
 ```
-
----
-
-## Next Steps After Testing
-
-1. **If Phase 1 & 2 work** (predict button responds, live forecast updates):
-   - Collect 30–50 real training examples
-   - Run cross-validation to estimate accuracy
-   - If accuracy > 80%, you have a working classifier!
-
-2. **If you hit bugs**:
-   - Check browser console (F12) for error messages
-   - Note the exact steps to reproduce
-   - See Troubleshooting section above
-
-3. **Once validated on real data**:
-   - Consider tuning k parameter (default 5)
-   - Explore whether certain features matter more (feature importance)
-   - Optionally add a "save recording" button for later analysis
-
----
-
-## Performance Notes
-
-- **Feature extraction**: ~50ms per 10-second window
-- **k-NN prediction**: ~10ms (100 training examples, 25 features)
-- **Live prediction**: runs every 5 seconds in background, doesn't block UI
-- **Storage**: 100 examples ≈ 2–3 MB (stored in IndexedDB)
-
----
-
-## Architecture Recap
-
-```
-app.js
-  ├─ loadMLModules() → dynamically import .js files
-  │  ├─ features.js (extractFeatures, extractFeaturesWindowed)
-  │  ├─ classifier.js (KNNClassifier, evaluateCrossValidation)
-  │  └─ training-set.js (TrainingSet, IndexedDB/localStorage)
-  │
-  ├─ state.trainSet (TrainingSet instance)
-  ├─ state.classifier (KNNClassifier, rebuilt per prediction)
-  │
-  ├─ Phase 1: predictPlatform() → post-hoc k-NN on full recording
-  ├─ Phase 2: makeLivePrediction() → streaming k-NN every 5s
-  │
-  ├─ Label workflow: showLabelingDialog() → labelAndSaveToTrainingSet()
-  └─ Init: load ML modules and training set on startup
-```
-
----
-
-Good luck! Once you've tested on real data, you'll have a working platform predictor. 🚇
-

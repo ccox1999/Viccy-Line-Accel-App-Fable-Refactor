@@ -56,7 +56,8 @@
     <header class="app-header">
       <h1>Victoria Line Motion Lab</h1>
       <p class="subtitle">
-        Record iPhone motion data and visualise accelerations and rotations
+        Record a trip, label its Brixton platform, and let the app learn to
+        predict left vs right from the motion.
       </p>
     </header>
 
@@ -104,25 +105,28 @@
         </button>
       </div>
 
-
-      <!-- Debug: Generate Fake Training Data -->
-      <div class="controls-row">
-        <button type="button" id="generateTestDataBtn" class="btn btn-outline" title="Generate 10 fake training examples (5 left, 5 right) for testing">
-          🧪 Test Data
-        </button>
-      </div>
-
-      <!-- Backup & Restore Training Data -->
-      <div class="controls-row">
-        <button type="button" id="backupBtn" class="btn btn-outline" disabled title="Download backup of training data (save to OneDrive or email to yourself)">
-          ⬇️ Backup Data
-        </button>
-        <button type="button" id="restoreBtn" class="btn btn-outline" title="Restore training data from a backup file (select a .json file)">
-          ⬆️ Restore Data
-        </button>
-      </div>
-
       <div id="trainingStatus" class="training-status-text hidden"></div>
+
+      <!-- Maintenance actions tucked behind a disclosure to keep the main
+           record → label flow uncluttered. -->
+      <details class="tools-group">
+        <summary class="tools-summary">Data &amp; tools</summary>
+        <div class="tools-body">
+          <div class="controls-row">
+            <button type="button" id="backupBtn" class="btn btn-outline" disabled title="Download a backup of your training data (save to OneDrive or email it to yourself)">
+              ⬇️ Backup Data
+            </button>
+            <button type="button" id="restoreBtn" class="btn btn-outline" title="Restore training data from a backup file (select a .json file)">
+              ⬆️ Restore Data
+            </button>
+          </div>
+          <div class="controls-row">
+            <button type="button" id="generateTestDataBtn" class="btn btn-outline" title="Generate 10 fake training examples (5 left, 5 right) for testing the flow without real trips">
+              🧪 Test Data
+            </button>
+          </div>
+        </div>
+      </details>
     </section>
 
     <!-- Recordings History -->

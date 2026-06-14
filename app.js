@@ -130,7 +130,6 @@ async function loadMLModules() {
     data: [],            // { time, ax, ay, az, rotationAlpha, rotationBeta, rotationGamma }
     startTime: null,     // performance.now() ms at recording start
     dataTrimmed: false,  // true once the rolling buffer has dropped old samples
-    unsaved: false,      // there is a finished recording not yet exported
     rafId: null,         // current requestAnimationFrame handle
     lastStatsAt: 0,      // last counter-text update (rAF timestamp)
     watchdogId: null,    // "no sensor data" timer
@@ -181,13 +180,6 @@ async function loadMLModules() {
   // Align odd line widths to the pixel grid for crisp 1px rules.
   function crisp(v) {
     return Math.round(v) + 0.5;
-  }
-
-  function timestampForFilename() {
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_` +
-           `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
   }
 
   // ---------- Canvas sizing ------------------------------------------------
@@ -446,7 +438,7 @@ async function loadMLModules() {
 
   function renderRecordingsList() {
     if (!state.trainSet || state.trainSet.count() === 0) {
-      ui.recordingsList.innerHTML = "<p style='text-align: center; color: var(--text-muted); margin: 0;'>No recordings yet</p>";
+      ui.recordingsList.innerHTML = "<p class='history-empty'>No recordings yet</p>";
       return;
     }
 
@@ -950,15 +942,8 @@ async function loadMLModules() {
   // ---------- Recording ----------------------------------------------------
 
   function startRecording() {
-    // Guard against silently wiping a finished-but-unsaved take.
-    if (state.unsaved && state.data.length &&
-        !window.confirm("Start a new recording? The unsaved one will be discarded.")) {
-      return;
-    }
-
     state.data = [];
     state.dataTrimmed = false;
-    state.unsaved = false;
     state.startTime = performance.now();
     state.recording = true;
     state.lastPredictionAt = 0;
@@ -1102,15 +1087,14 @@ async function loadMLModules() {
   // ---------- Clear --------------------------------------------------------
 
   ui.clearBtn.addEventListener("click", () => {
-    if (state.unsaved && state.data.length &&
-        !window.confirm("Discard this unsaved recording?")) {
+    // An unlabeled recording isn't persisted, so confirm before discarding it.
+    if (state.data.length && !window.confirm("Discard this recording?")) {
       return;
     }
 
     state.data = [];
     state.startTime = null;
     state.dataTrimmed = false;
-    state.unsaved = false;
     setSessionState("Idle");
     ui.clearBtn.disabled = true;
     updateSessionInfo();
@@ -1131,15 +1115,6 @@ async function loadMLModules() {
     } else {
       resizeAllCanvases();
       scheduleRender();
-    }
-  });
-
-  // Warn before losing an unsaved recording. (Best-effort: iOS Safari often
-  // skips this prompt, but desktop and Android honour it.)
-  window.addEventListener("beforeunload", (e) => {
-    if (state.unsaved && state.data.length) {
-      e.preventDefault();
-      e.returnValue = "";
     }
   });
 
