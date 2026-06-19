@@ -288,68 +288,81 @@ body {
   text-align: center;
 }
 
-/* Podium-style two-position forecast layout */
+/* ------------------------------------------------------------
+   Podium-style two-position forecast.
+
+   Each row is a FIXED direction (LEFT / RIGHT). Both rows are
+   absolutely positioned at the same origin; a transform pushes the
+   rank-bottom row down by one row-height + gap. Toggling rank-top /
+   rank-bottom animates the transform, so the two rows physically
+   slide past each other when the lead changes (Mario-Kart podium).
+   `order`/flex can't animate position — transform can.
+   ------------------------------------------------------------ */
 .forecast-podium {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 12px;
+  --pod-row-h: 64px;
+  --pod-gap: 12px;
+  position: relative;
+  height: calc(var(--pod-row-h) * 2 + var(--pod-gap));
+  margin-bottom: 10px;
 }
 
 .forecast-position {
-  padding: 14px;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--pod-row-h);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
   background: #1a1f2e;
-  border-radius: 10px;
   border: 1px solid #262833;
-  transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55); /* bouncy podium swap */
+  border-radius: 12px;
+  will-change: transform;
+  /* Springy ease so the swap feels like a podium snap, not a linear glide. */
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 0.35s ease,
+              border-color 0.35s ease;
 }
 
-.forecast-position-top {
-  order: 1;
-}
-
-.forecast-position-bottom {
-  order: 2;
-  opacity: 0.6;
-}
-
-/* When bottom position is leading, swap order with animation */
-.forecast-podium.swap-order .forecast-position-top {
-  order: 2;
-  opacity: 0.6;
-}
-
-.forecast-podium.swap-order .forecast-position-bottom {
-  order: 1;
+.forecast-position.rank-top {
+  transform: translateY(0);
   opacity: 1;
 }
 
+.forecast-position.rank-bottom {
+  transform: translateY(calc(var(--pod-row-h) + var(--pod-gap)));
+  opacity: 0.5;
+}
+
+/* The leader gets a coloured border to reinforce who's on top. */
+.forecast-position.platform-left.rank-top  { border-color: rgba(255, 55, 95, 0.55); }
+.forecast-position.platform-right.rank-top { border-color: rgba(50, 215, 75, 0.55); }
+
 .forecast-label {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
 }
 
-.forecast-label.platform-left {
-  color: var(--ax); /* red */
-}
-
-.forecast-label.platform-right {
-  color: var(--ay); /* green */
-}
+.forecast-position.platform-left  .forecast-label { color: var(--ax); }
+.forecast-position.platform-right .forecast-label { color: var(--ay); }
 
 .forecast-percentage {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 700;
-  letter-spacing: -1px;
+  letter-spacing: -0.5px;
+  /* Tabular figures stop the percentage jittering as digits change. */
+  font-variant-numeric: tabular-nums;
 }
 
 .forecast-note {
   font-size: 12px;
   color: #6b7280;
   margin-top: 4px;
+  text-align: center;
 }
 
 /* Modal for labeling (CSP-safe, no inline styles) */
@@ -656,10 +669,20 @@ canvas {
   touch-action: pan-y;     /* page still scrolls when a drag starts on a chart */
 }
 
-/* During recording: disable all touch interaction on charts to prevent rAF
-   blocking. This ensures smooth rendering even if the user touches or scrolls. */
-body.recording canvas {
+/* ------------------------------------------------------------
+   During recording, lock the page from scrolling.
+
+   On iOS a scroll gesture hands the main thread to the compositor,
+   which pauses BOTH requestAnimationFrame and devicemotion delivery.
+   That stalls the chart AND drops sensor samples, so on release the
+   trace draws a straight line across the gap. Disabling scroll (here
+   in CSS, plus a non-passive touchmove guard in app.js) keeps the
+   main thread free so sampling and drawing never stall.
+   ------------------------------------------------------------ */
+body.recording {
+  overflow: hidden;
   touch-action: none;
+  overscroll-behavior: none;
 }
 
 /* ------------------------------------------------------------

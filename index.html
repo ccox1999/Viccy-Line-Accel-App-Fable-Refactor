@@ -144,16 +144,16 @@
         <h2 class="chart-title">Live Platform Forecast</h2>
       </div>
       <div class="forecast-body">
-        <div class="forecast-podium">
-          <!-- Top position (leading platform) -->
-          <div id="forecastTop" class="forecast-position forecast-position-top">
-            <div class="forecast-label"></div>
-            <div class="forecast-percentage"></div>
+        <!-- Each row is a fixed direction; the rank-top / rank-bottom classes
+             slide them past each other (podium swap) when the lead changes. -->
+        <div class="forecast-podium" role="list" aria-label="Live direction estimate">
+          <div id="forecastLeft" class="forecast-position platform-left rank-top" role="listitem">
+            <span class="forecast-label">&larr; Left</span>
+            <span class="forecast-percentage">&mdash;</span>
           </div>
-          <!-- Bottom position (trailing platform) -->
-          <div id="forecastBottom" class="forecast-position forecast-position-bottom">
-            <div class="forecast-label"></div>
-            <div class="forecast-percentage"></div>
+          <div id="forecastRight" class="forecast-position platform-right rank-bottom" role="listitem">
+            <span class="forecast-label">Right &rarr;</span>
+            <span class="forecast-percentage">&mdash;</span>
           </div>
         </div>
         <div id="forecastNote" class="forecast-note">Waiting for data&hellip;</div>

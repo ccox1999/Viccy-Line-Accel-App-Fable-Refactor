@@ -101,8 +101,8 @@ async function loadMLModules() {
       gyroCanvas: requireElement("gyroChart"),
       trainingStatus: requireElement("trainingStatus"),
       liveForcastCard: requireElement("liveForcastCard"),
-      forecastPlatform: requireElement("forecastPlatform"),
-      forecastConfidence: requireElement("forecastConfidence"),
+      forecastLeft: requireElement("forecastLeft"),
+      forecastRight: requireElement("forecastRight"),
       forecastNote: requireElement("forecastNote"),
     };
   } catch (err) {
@@ -514,64 +514,47 @@ async function loadMLModules() {
         state.classifierBuiltFor = state.trainSet.count();
       }
 
-      // Predict
-      const prediction = state.classifier.predict(features);
-      state.lastLivePrediction = prediction;
+      // Continuous (distance-weighted) probability — smooth, not quantised to
+      // k discrete votes, so the live percentage actually moves second to
+      // second instead of jumping in 20-point steps.
+      const proba = state.classifier.predictProbability(features);
+      state.lastLivePrediction = proba;
 
-      // Calculate percentages from raw votes
-      const totalVotes = prediction.rawVotes.left + prediction.rawVotes.right;
-      const leftPct = totalVotes > 0 ? (prediction.rawVotes.left / totalVotes) * 100 : 0;
-      const rightPct = totalVotes > 0 ? (prediction.rawVotes.right / totalVotes) * 100 : 0;
+      const leftPct = proba.pLeft * 100;
+      const rightPct = proba.pRight * 100;
 
-      // Determine which is leading (>50%)
-      const leader = leftPct > rightPct ? "left" : "right";
-      const leadingPct = Math.max(leftPct, rightPct);
-      const trailingPct = Math.min(leftPct, rightPct);
-      const trailingDir = leader === "left" ? "right" : "left";
+      updateForecastPodium(leftPct, rightPct);
 
-      // Update UI with podium-style layout
-      updateForecastPodium(leader, leadingPct, trailingDir, trailingPct);
-
-      // Update note with vote counts
-      ui.forecastNote.textContent = `${prediction.rawVotes.left}L / ${prediction.rawVotes.right}R`;
+      ui.forecastNote.textContent = `based on ${proba.neighbors.length} nearest trips`;
     } catch (err) {
       console.warn("[ML] Live prediction failed:", err);
     }
   }
 
   /**
-   * Update the forecast podium with leader at top, animation on swap.
+   * Update the forecast podium. Each row is a fixed direction; the row with
+   * the higher percentage takes the top rank, and the rank-top / rank-bottom
+   * classes animate the two rows sliding past each other on a lead change.
    */
-  function updateForecastPodium(leader, leadingPct, trailerDir, trailerPct) {
-    const podium = document.querySelector(".forecast-podium");
-    const topPos = document.getElementById("forecastTop");
-    const bottomPos = document.getElementById("forecastBottom");
+  function updateForecastPodium(leftPct, rightPct) {
+    ui.forecastLeft.querySelector(".forecast-percentage").textContent =
+      `${leftPct.toFixed(1)}%`;
+    ui.forecastRight.querySelector(".forecast-percentage").textContent =
+      `${rightPct.toFixed(1)}%`;
 
-    // Determine if order should swap
-    const shouldSwap = state.lastDisplayedLeader && state.lastDisplayedLeader !== leader;
-    state.lastDisplayedLeader = leader;
+    const leader = leftPct >= rightPct ? "left" : "right";
+    const leftLeads = leader === "left";
 
-    if (shouldSwap) {
-      podium.classList.add("swap-order");
-      // Remove swap class after animation completes so next update can trigger again
-      setTimeout(() => {
-        podium.classList.remove("swap-order");
-      }, 500);
+    ui.forecastLeft.classList.toggle("rank-top", leftLeads);
+    ui.forecastLeft.classList.toggle("rank-bottom", !leftLeads);
+    ui.forecastRight.classList.toggle("rank-top", !leftLeads);
+    ui.forecastRight.classList.toggle("rank-bottom", leftLeads);
+
+    // Haptic tick on a lead change to make the podium swap feel physical.
+    if (state.lastDisplayedLeader && state.lastDisplayedLeader !== leader) {
+      hapticTick(12);
     }
-
-    // Update top position (leading)
-    const topLabel = topPos.querySelector(".forecast-label");
-    const topPercentage = topPos.querySelector(".forecast-percentage");
-    topLabel.textContent = leader.toUpperCase();
-    topLabel.className = `forecast-label platform-${leader}`;
-    topPercentage.textContent = `${leadingPct.toFixed(1)}%`;
-
-    // Update bottom position (trailing)
-    const bottomLabel = bottomPos.querySelector(".forecast-label");
-    const bottomPercentage = bottomPos.querySelector(".forecast-percentage");
-    bottomLabel.textContent = trailerDir.toUpperCase();
-    bottomLabel.className = `forecast-label platform-${trailerDir}`;
-    bottomPercentage.textContent = `${trailerPct.toFixed(1)}%`;
+    state.lastDisplayedLeader = leader;
   }
 
   /**
@@ -894,6 +877,15 @@ async function loadMLModules() {
     ui.duration.textContent = `${seconds.toFixed(1)} s`;
   }
 
+  // Block page scrolling while recording. Must be a NON-passive listener so
+  // preventDefault() is honoured; defined once so add/remove pair up exactly.
+  // (CSS touch-action:none on body.recording covers most cases; this is the
+  // belt-and-braces guard for iOS, where a scroll otherwise parks the main
+  // thread and drops sensor samples.)
+  function blockScroll(event) {
+    event.preventDefault();
+  }
+
   // ---------- Motion capture -----------------------------------------------
 
   function handleMotion(event) {
@@ -1007,22 +999,21 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-secondary");
     ui.recordBtn.classList.add("btn-danger");
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
-    document.body.classList.add("recording");   // disable touch on charts (CSS)
+    document.body.classList.add("recording");   // lock scroll (CSS)
+    document.addEventListener("touchmove", blockScroll, { passive: false });
     setSessionState("Recording\u2026");
     ui.clearBtn.disabled = true;
 
-    // Show live forecast card (Phase 2), reset to its waiting state
+    // Show live forecast card (Phase 2), reset to its waiting state.
+    // LEFT starts on top by convention (no animation until a real lead lands).
     ui.liveForcastCard.classList.remove("hidden");
-    state.lastDisplayedLeader = null; // reset podium state
-    const podium = document.querySelector(".forecast-podium");
-    podium.classList.remove("swap-order");
-    document.querySelectorAll(".forecast-label").forEach(label => {
-      label.textContent = "\u2014";
-      label.className = "forecast-label";
-    });
-    document.querySelectorAll(".forecast-percentage").forEach(pct => {
-      pct.textContent = "\u2014";
-    });
+    state.lastDisplayedLeader = null;
+    ui.forecastLeft.classList.add("rank-top");
+    ui.forecastLeft.classList.remove("rank-bottom");
+    ui.forecastRight.classList.add("rank-bottom");
+    ui.forecastRight.classList.remove("rank-top");
+    ui.forecastLeft.querySelector(".forecast-percentage").textContent = "\u2014";
+    ui.forecastRight.querySelector(".forecast-percentage").textContent = "\u2014";
     ui.forecastNote.textContent = "Waiting for data\u2026";
 
     hapticTick(15);
@@ -1043,7 +1034,8 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-danger");
     ui.recordBtn.classList.add("btn-secondary");
     ui.sessionState.classList.remove("recording");
-    document.body.classList.remove("recording");   // re-enable touch on charts (CSS)
+    document.body.classList.remove("recording");   // re-enable scroll (CSS)
+    document.removeEventListener("touchmove", blockScroll, { passive: false });
 
     // Hide live forecast card (Phase 2)
     ui.liveForcastCard.classList.add("hidden");

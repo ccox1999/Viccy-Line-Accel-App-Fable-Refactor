@@ -172,6 +172,47 @@ export class KNNClassifier {
   }
 
   /**
+   * Continuous left/right probability via distance-weighted (soft) k-NN.
+   *
+   * predict() returns a discrete majority vote quantised to 1/k steps — with
+   * k=5 the only possible confidences are 60/80/100%, so a live readout built
+   * on it jumps in 20-point steps and never moves smoothly. This returns a
+   * smooth probability instead: each of the nearest neighbours votes with a
+   * Gaussian weight on its distance, and the bandwidth is the median
+   * neighbour distance so the estimate is scale-adaptive (independent of the
+   * absolute feature-distance scale, which varies between datasets).
+   *
+   * @param {Object} features - feature vector to classify
+   * @returns {Object} { pLeft, pRight, neighbors }
+   */
+  predictProbability(features) {
+    if (this.examples.length === 0) {
+      return { pLeft: 0.5, pRight: 0.5, neighbors: [], error: "No training examples" };
+    }
+
+    // Use more neighbours than the discrete k so the soft estimate is stable.
+    const n = Math.min(this.examples.length, Math.max(this.k, 12));
+    const neighbors = this.findNearestNeighbors(features, n);
+
+    // Median-distance bandwidth → scale-adaptive, smooth kernel.
+    const sorted = neighbors.map((nb) => nb.distance).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] || 0;
+    const bw = median > 1e-6 ? median : 1;
+
+    let wLeft = 0;
+    let wRight = 0;
+    for (const nb of neighbors) {
+      const w = Math.exp(-(nb.distance * nb.distance) / (2 * bw * bw));
+      if (nb.label === "left") wLeft += w;
+      else if (nb.label === "right") wRight += w;
+    }
+
+    const total = wLeft + wRight;
+    if (total <= 0) return { pLeft: 0.5, pRight: 0.5, neighbors };
+    return { pLeft: wLeft / total, pRight: wRight / total, neighbors };
+  }
+
+  /**
    * Find the k nearest neighbors to a feature vector.
    * Distances are computed in z-score-normalized space.
    *

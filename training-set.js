@@ -299,8 +299,15 @@ export class TrainingSet {
   async autoBackup() {
     const backupKey = `${this.storageKey}--backup`;
     try {
-      localStorage.setItem(backupKey, JSON.stringify(this.toJSON()));
-      console.log(`[TrainingSet] Auto-backup saved (${this.examples.length} examples)`);
+      // The safety net only needs the feature vectors to rebuild the
+      // classifier after an accidental clear. Raw motion data is large and
+      // already lives in the primary store (and in the manual "Backup Data"
+      // download), so we strip it here to avoid doubling localStorage usage
+      // and tripping Safari's ~5 MB quota.
+      const json = this.toJSON();
+      for (const ex of json.examples) delete ex.rawMotionData;
+      localStorage.setItem(backupKey, JSON.stringify(json));
+      console.log(`[TrainingSet] Auto-backup saved (${this.examples.length} examples, features only)`);
     } catch (err) {
       console.warn("[TrainingSet] Auto-backup failed:", err);
     }
