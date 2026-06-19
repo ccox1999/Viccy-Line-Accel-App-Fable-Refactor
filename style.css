@@ -76,14 +76,14 @@ body {
 
 .app-header h1 {
   margin: 0;
-  font-size: 22px;
+  font-size: 19px;
   letter-spacing: -0.01em;
 }
 
 .subtitle {
-  margin: 4px 0 0;
-  font-size: 14px;
-  line-height: 1.35;
+  margin: 3px 0 0;
+  font-size: 13px;
+  line-height: 1.3;
   color: var(--text-muted);
 }
 
@@ -91,43 +91,18 @@ body {
 
 .card {
   background: var(--card-bg);
-  border-radius: 18px;
-  padding: 14px;
-  margin-top: 14px;
+  border-radius: 16px;
+  padding: 12px;
+  margin-top: 10px;
   border: 1px solid var(--border);
 }
 
-/* Status card */
-
-.status-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
-.status-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.status-value {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 15px;
-  font-weight: 600;
-  text-align: right;
-}
-
 /* Pulsing red dot while recording (class toggled by app.js) */
-.status-value.recording::before {
+.hud-state.recording::before {
   content: "";
   flex: none;
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--danger);
   animation: rec-pulse 1.2s ease-in-out infinite;
@@ -138,14 +113,107 @@ body {
   50%      { opacity: 0.45; transform: scale(0.85); }
 }
 
-.status-row {
+/* ------------------------------------------------------------
+   Record / stop button (iOS-camera style) + clear icon button
+   ------------------------------------------------------------ */
+.record-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.record-side {
   display: flex;
-  justify-content: space-between;
-  font-size: 14px;
-  margin-top: 6px;
+  align-items: center;
+}
+.record-side--left {
+  justify-content: flex-end;
+  padding-right: 8px;
+}
+
+.record-btn {
+  width: 66px;
+  height: 66px;
+  border-radius: 50%;
+  border: 3px solid #3a3f4f;
+  background: #14161e;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.2s ease, transform 0.08s ease, opacity 0.15s ease;
+}
+.record-btn:active:not(:disabled) { transform: scale(0.94); }
+.record-btn:disabled { opacity: 0.4; cursor: default; }
+.record-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.record-btn.is-recording { border-color: var(--danger); }
+
+.record-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--danger);
+  transition: width 0.2s ease, height 0.2s ease, border-radius 0.2s ease;
+}
+.record-btn.is-recording .record-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px; /* square = stop */
+}
+
+.icon-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
   color: var(--text-muted);
-  /* Tabular figures stop the counters jittering as digits change */
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+.icon-btn svg { width: 20px; height: 20px; }
+.icon-btn:active:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ------------------------------------------------------------
+   Stats HUD — baked over the acceleration plot (replaces the old
+   status banner). Sits top-right, where the chart has no axis labels.
+   ------------------------------------------------------------ */
+.chart-hud {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  pointer-events: none; /* never intercept touches meant for scrolling */
+  text-shadow: 0 1px 3px #05060a, 0 0 2px #05060a;
+}
+.hud-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.hud-stats {
+  display: inline-flex;
+  gap: 8px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
 }
 
 /* ------------------------------------------------------------
@@ -281,11 +349,19 @@ body {
   color: var(--text-muted);
 }
 
-/* Live platform forecast card */
+/* Live platform forecast card (compact, shown during recording) */
 
-.forecast-body {
-  padding: 16px;
-  text-align: center;
+.forecast-card {
+  padding: 10px 12px;
+}
+
+.forecast-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
 }
 
 /* ------------------------------------------------------------
@@ -299,11 +375,11 @@ body {
    `order`/flex can't animate position — transform can.
    ------------------------------------------------------------ */
 .forecast-podium {
-  --pod-row-h: 64px;
-  --pod-gap: 12px;
+  --pod-row-h: 46px;
+  --pod-gap: 8px;
   position: relative;
   height: calc(var(--pod-row-h) * 2 + var(--pod-gap));
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .forecast-position {
@@ -316,7 +392,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: 0 16px;
   background: #1a1f2e;
   border: 1px solid #262833;
   border-radius: 12px;
@@ -342,7 +418,7 @@ body {
 .forecast-position.platform-right.rank-top { border-color: rgba(50, 215, 75, 0.55); }
 
 .forecast-label {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.3px;
 }
@@ -351,7 +427,7 @@ body {
 .forecast-position.platform-right .forecast-label { color: var(--ay); }
 
 .forecast-percentage {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.5px;
   /* Tabular figures stop the percentage jittering as digits change. */
@@ -601,17 +677,23 @@ body {
 
 /* Charts */
 
+/* The stage wraps a canvas + its HUD so the HUD anchors to the plot area
+   (below the header), where the top-right has no axis labels to collide with. */
+.chart-stage {
+  position: relative;
+}
+
 .chart-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .chart-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
@@ -678,7 +760,9 @@ body.recording * {
 canvas {
   display: block;          /* removes the inline-baseline gap below the canvas */
   width: 100%;             /* JS reads this size; it never writes inline styles */
-  height: 220px;
+  /* Viewport-relative so BOTH charts + the live forecast fit on one phone
+     screen. Clamped so it never gets unusably short or absurdly tall. */
+  height: clamp(120px, 22vh, 200px);
   border-radius: 12px;
   background: #05060a;
   border: 1px solid #1f2230;
@@ -707,7 +791,7 @@ canvas {
   .btn:active:not(:disabled) {
     transform: none;
   }
-  .status-value.recording::before {
+  .hud-state.recording::before {
     animation: none; /* static red dot still indicates recording */
   }
 }

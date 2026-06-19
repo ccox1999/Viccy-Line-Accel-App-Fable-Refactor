@@ -55,54 +55,35 @@
 
     <header class="app-header">
       <h1>Victoria Line Motion Lab</h1>
-      <p class="subtitle">
-        Record a trip, label its Brixton platform, and let the app learn to
-        predict left vs right from the motion.
-      </p>
+      <p class="subtitle">Record a trip, label its platform, and the app learns to predict left vs right.</p>
     </header>
-
-    <section class="card status-card" aria-label="Session status">
-      <div class="status-header">
-        <h2 class="status-title">Session status</h2>
-        <!-- aria-live announces state changes (Recording, Recorded, Saved…) to screen readers.
-             The fast-changing counters below deliberately do NOT announce. -->
-        <div id="sessionState" class="status-value" role="status" aria-live="polite">Idle</div>
-      </div>
-
-      <div class="status-body">
-        <div class="status-row">
-          <span>Total samples</span>
-          <span id="sampleCount">0</span>
-        </div>
-        <div class="status-row">
-          <span>Sample rate</span>
-          <span id="sampleRate">&mdash;</span>
-        </div>
-        <div class="status-row">
-          <span>Duration</span>
-          <span id="duration">0.0 s</span>
-        </div>
-      </div>
-    </section>
 
     <section class="card controls-card" aria-label="Recording controls">
       <div id="sensorStatus" class="status-pill status-pill--pending" role="status" aria-live="polite">
         Motion permission: not requested
       </div>
 
-      <div class="controls-row">
-        <button type="button" id="sensorBtn" class="btn btn-primary">
-          Enable Motion Sensors
-        </button>
-        <button type="button" id="recordBtn" class="btn btn-secondary" disabled>
-          Start Recording
-        </button>
-      </div>
+      <button type="button" id="sensorBtn" class="btn btn-primary">
+        Enable Motion Sensors
+      </button>
 
-      <div class="controls-row">
-        <button type="button" id="clearBtn" class="btn btn-outline" disabled>
-          Clear
+      <div class="record-row">
+        <div class="record-side record-side--left">
+          <button type="button" id="clearBtn" class="icon-btn" disabled aria-label="Discard recording" title="Discard recording">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3 6h18" />
+              <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              <path d="M10 11v6M14 11v6" />
+            </svg>
+          </button>
+        </div>
+
+        <button type="button" id="recordBtn" class="record-btn" disabled aria-label="Start recording" title="Start recording">
+          <span class="record-icon"></span>
         </button>
+
+        <div class="record-side"></div>
       </div>
 
       <div id="trainingStatus" class="training-status-text hidden"></div>
@@ -129,35 +110,22 @@
       </details>
     </section>
 
-    <!-- Recordings History -->
-    <section class="card history-card hidden" aria-label="Recordings history">
-      <div class="history-header">
-        <h2 class="history-title">📋 Recordings History</h2>
-        <button type="button" id="toggleHistoryBtn" class="btn btn-small" title="Collapse history">−</button>
-      </div>
-      <div id="recordingsList" class="recordings-list"></div>
-    </section>
-
     <!-- Live Platform Forecast (shown during recording) -->
-    <section id="liveForcastCard" class="card chart-card hidden" aria-label="Live platform forecast">
-      <div class="chart-header">
-        <h2 class="chart-title">Live Platform Forecast</h2>
-      </div>
-      <div class="forecast-body">
-        <!-- Each row is a fixed direction; the rank-top / rank-bottom classes
-             slide them past each other (podium swap) when the lead changes. -->
-        <div class="forecast-podium" role="list" aria-label="Live direction estimate">
-          <div id="forecastLeft" class="forecast-position platform-left rank-top" role="listitem">
-            <span class="forecast-label">&larr; Left</span>
-            <span class="forecast-percentage">&mdash;</span>
-          </div>
-          <div id="forecastRight" class="forecast-position platform-right rank-bottom" role="listitem">
-            <span class="forecast-label">Right &rarr;</span>
-            <span class="forecast-percentage">&mdash;</span>
-          </div>
+    <section id="liveForcastCard" class="card forecast-card hidden" aria-label="Live platform forecast">
+      <h2 class="forecast-title">Live estimate</h2>
+      <!-- Each row is a fixed direction; the rank-top / rank-bottom classes
+           slide them past each other (podium swap) when the lead changes. -->
+      <div class="forecast-podium" role="list" aria-label="Live direction estimate">
+        <div id="forecastLeft" class="forecast-position platform-left rank-top" role="listitem">
+          <span class="forecast-label">&larr; Left</span>
+          <span class="forecast-percentage">&mdash;</span>
         </div>
-        <div id="forecastNote" class="forecast-note">Waiting for data&hellip;</div>
+        <div id="forecastRight" class="forecast-position platform-right rank-bottom" role="listitem">
+          <span class="forecast-label">Right &rarr;</span>
+          <span class="forecast-percentage">&mdash;</span>
+        </div>
       </div>
+      <div id="forecastNote" class="forecast-note">Waiting for data&hellip;</div>
     </section>
 
     <!-- ACCELERATION CHART -->
@@ -224,10 +192,22 @@
         </div>
       </div>
 
-      <canvas id="accelChart" role="img"
-              aria-label="Live chart of X, Y and Z acceleration in g over the last 8 seconds">
-        Live acceleration chart (your browser does not support canvas).
-      </canvas>
+      <div class="chart-stage">
+        <!-- Session stats baked over the plot (replaces the old status banner) -->
+        <div class="chart-hud">
+          <span id="sessionState" class="hud-state" role="status" aria-live="polite">Idle</span>
+          <span class="hud-stats">
+            <span id="duration" title="Duration">0.0 s</span>
+            <span id="sampleRate" title="Sample rate">&mdash;</span>
+            <span id="sampleCount" title="Total samples">0</span>
+          </span>
+        </div>
+
+        <canvas id="accelChart" role="img"
+                aria-label="Live chart of X, Y and Z acceleration in g over the last 8 seconds">
+          Live acceleration chart (your browser does not support canvas).
+        </canvas>
+      </div>
     </section>
 
     <!-- ROTATION CHART -->
@@ -289,6 +269,15 @@
               aria-label="Live chart of alpha, beta and gamma rotation rate in degrees per second over the last 8 seconds">
         Live rotation chart (your browser does not support canvas).
       </canvas>
+    </section>
+
+    <!-- Recordings History (kept at the bottom, out of the record→watch flow) -->
+    <section class="card history-card hidden" aria-label="Recordings history">
+      <div class="history-header">
+        <h2 class="history-title">📋 Recordings History</h2>
+        <button type="button" id="toggleHistoryBtn" class="btn btn-small" title="Collapse history">−</button>
+      </div>
+      <div id="recordingsList" class="recordings-list"></div>
     </section>
 
   </div>

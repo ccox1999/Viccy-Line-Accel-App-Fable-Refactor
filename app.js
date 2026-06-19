@@ -1105,10 +1105,11 @@ async function loadMLModules() {
       // Browsers without requestPermission (Android, desktop) need no prompt.
 
       setPill("granted", "Motion permission: granted");
-      setSessionState("Sensors enabled");
+      setSessionState("Ready");
       ui.recordBtn.disabled = false;
-      ui.sensorBtn.disabled = true;
-      ui.sensorBtn.textContent = "Sensors Enabled";
+      // Collapse the enable button once granted — it's done its job and the
+      // space is better spent on the charts/forecast.
+      ui.sensorBtn.classList.add("hidden");
       hapticTick(10);
     } catch (err) {
       console.error("[MotionLab] Motion permission request failed:", err);
@@ -1148,9 +1149,9 @@ async function loadMLModules() {
       }
     }, SENSOR_WATCHDOG_MS);
 
-    ui.recordBtn.textContent = "Stop Recording";
-    ui.recordBtn.classList.remove("btn-secondary");
-    ui.recordBtn.classList.add("btn-danger");
+    ui.recordBtn.classList.add("is-recording"); // circle → stop square (CSS)
+    ui.recordBtn.setAttribute("aria-label", "Stop recording");
+    ui.recordBtn.title = "Stop recording";
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
     document.body.classList.add("recording");   // route panning through JS (CSS)
     // Take over scrolling on the main thread so the page still scrolls but the
@@ -1187,9 +1188,9 @@ async function loadMLModules() {
       state.watchdogId = null;
     }
 
-    ui.recordBtn.textContent = "Start Recording";
-    ui.recordBtn.classList.remove("btn-danger");
-    ui.recordBtn.classList.add("btn-secondary");
+    ui.recordBtn.classList.remove("is-recording"); // stop square → circle (CSS)
+    ui.recordBtn.setAttribute("aria-label", "Start recording");
+    ui.recordBtn.title = "Start recording";
     ui.sessionState.classList.remove("recording");
 
     // Hide live forecast card (Phase 2)
