@@ -93,6 +93,9 @@ export class TrainingSet {
       label,
       timestamp: metadata.timestamp || Date.now(),
       recordingId: metadata.recordingId || id,
+      sampleCount: metadata.sampleCount,
+      duration: metadata.duration,
+      rawMotionData: metadata.rawMotionData, // full raw timestamped sensor data
       notes: metadata.notes ?? "",
     });
 
