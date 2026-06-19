@@ -276,10 +276,11 @@ async function loadMLModules() {
     const trainSet = await ensureTrainSet();
     const sel = ml.classifier.selectBestModel(trainSet.examples, 0.6);
     state.selectedModelName = sel.name;
-    if (sel.knnAccuracy != null && sel.lrAccuracy != null) {
+    if (sel.accuracy != null) {
       console.log(
-        `[ML] model = ${sel.name} (kNN ${(sel.knnAccuracy * 100).toFixed(0)}% vs ` +
-          `logreg ${(sel.lrAccuracy * 100).toFixed(0)}% in cross-validation)`
+        `[ML] model = ${sel.name}, top ${sel.featureCount} features, ` +
+          `CV ${(sel.accuracy * 100).toFixed(0)}% ` +
+          `(all-feature k-NN baseline ${(sel.baselineAccuracy * 100).toFixed(0)}%)`
       );
     }
     return sel.model;

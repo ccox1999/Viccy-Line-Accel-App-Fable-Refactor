@@ -573,14 +573,102 @@ function _accuracyCV(data, makeModel, repeats = 12, testFraction = 0.3) {
   return valid > 0 ? total / valid : null;
 }
 
+/** Copy only the listed feature keys from a vector (drops the rest). */
+function _pruneTo(features, keySet) {
+  const out = {};
+  for (const k of keySet) if (k in features) out[k] = features[k];
+  return out;
+}
+
 /**
- * Model selection: train both an (adaptive-k) k-NN and logistic regression,
- * estimate each by repeated cross-validation on the user's OWN data, and return
- * the better one trained on all examples. k-NN is the default — LR is only
- * chosen when it beats k-NN by a clear margin — so this can never quietly
- * regress, it only upgrades when LR is genuinely better here.
+ * Rank features by class separation (a Fisher / effect-size score in z-scored
+ * space, regularised so a near-constant feature can't rank high on a fluke).
+ * Most of the ~46 features are sign-blind (energy, RMS, FFT…) and carry no
+ * left/right information; this floats the few that do (world-frame yaw, signed
+ * means, skewness) to the top. Computed from whatever rows it's given, so when
+ * called inside a CV fold it never sees the held-out data.
+ */
+function rankFeatures(rows) {
+  const keys = new Set();
+  for (const r of rows) for (const k in r.features) if (Number.isFinite(r.features[k])) keys.add(k);
+  const keyArr = [...keys];
+  const n = rows.length || 1;
+
+  const mean = {};
+  const std = {};
+  for (const k of keyArr) {
+    let s = 0;
+    for (const r of rows) s += r.features[k] ?? 0;
+    const m = s / n;
+    let sq = 0;
+    for (const r of rows) {
+      const d = (r.features[k] ?? 0) - m;
+      sq += d * d;
+    }
+    mean[k] = m;
+    std[k] = Math.max(1e-6, Math.sqrt(sq / n));
+  }
+  const z = (r, k) => ((r.features[k] ?? mean[k]) - mean[k]) / std[k];
+
+  const L = rows.filter((r) => r.label === "left");
+  const R = rows.filter((r) => r.label === "right");
+  const classStat = (grp, k) => {
+    if (grp.length === 0) return { m: 0, sd: 0 };
+    let s = 0;
+    for (const r of grp) s += z(r, k);
+    const m = s / grp.length;
+    let sq = 0;
+    for (const r of grp) {
+      const d = z(r, k) - m;
+      sq += d * d;
+    }
+    return { m, sd: Math.sqrt(sq / grp.length) };
+  };
+
+  return keyArr
+    .map((k) => {
+      const a = classStat(L, k);
+      const b = classStat(R, k);
+      return [k, Math.abs(a.m - b.m) / (a.sd + b.sd + 0.5)];
+    })
+    .sort((x, y) => y[1] - x[1])
+    .map((s) => s[0]);
+}
+
+/**
+ * Wraps a classifier so every input is pruned to a fixed feature subset before
+ * predicting. Keeps the inner model honest about which features it was trained
+ * on (essential for k-NN, whose distance otherwise sums over the query's keys).
+ */
+class FeatureSubsetModel {
+  constructor(inner, keys) {
+    this.inner = inner;
+    this.keys = keys;
+    this._keySet = new Set(keys);
+  }
+  predict(features) {
+    return this.inner.predict(_pruneTo(features, this._keySet));
+  }
+  predictProbability(features) {
+    return this.inner.predictProbability(_pruneTo(features, this._keySet));
+  }
+  count() {
+    return this.inner.count();
+  }
+}
+
+/**
+ * Model selection: search over {k-NN, logistic regression} × {how many of the
+ * top-ranked features to keep}, estimating each combination by repeated
+ * cross-validation on the user's OWN data (feature ranking done inside each
+ * fold — no leakage). Returns the winner trained on all examples.
  *
- * @returns {{ model, name, knnAccuracy, lrAccuracy, accuracy }}
+ * The all-feature k-NN is the baseline; a different model/feature-count is only
+ * adopted when it beats that baseline by a clear margin (>2pp). So this can
+ * never quietly regress — it only upgrades when a leaner or linear model is
+ * genuinely better on this data.
+ *
+ * @returns {{ model, name, accuracy, featureCount, baselineAccuracy }}
  */
 export function selectBestModel(examples, minConfidence = 0.6) {
   const usable = (examples || []).filter(
@@ -593,37 +681,81 @@ export function selectBestModel(examples, minConfidence = 0.6) {
     timestamp: e.timestamp,
   }));
 
-  const buildKNN = (rows, mc = 0) => {
-    const c = new KNNClassifier(adaptiveK(rows.length), mc);
-    for (const r of rows) c.addTrainingExample(r.features, r.label, { recordingId: r.recordingId, timestamp: r.timestamp });
-    return c;
+  // K = Infinity → keep all features.
+  const buildKNN = (rows, K, mc = 0) => {
+    const keys = K === Infinity ? rankFeatures(rows) : rankFeatures(rows).slice(0, K);
+    const keySet = new Set(keys);
+    const inner = new KNNClassifier(adaptiveK(rows.length), mc);
+    for (const r of rows) {
+      inner.addTrainingExample(_pruneTo(r.features, keySet), r.label, {
+        recordingId: r.recordingId,
+        timestamp: r.timestamp,
+      });
+    }
+    return new FeatureSubsetModel(inner, keys);
   };
-  const buildLR = (rows, mc = 0) => {
-    const m = new LogisticRegression({ minConfidence: mc });
-    for (const r of rows) m.addTrainingExample(r.features, r.label);
-    return m;
+  const buildLR = (rows, K, mc = 0) => {
+    const keys = K === Infinity ? rankFeatures(rows) : rankFeatures(rows).slice(0, K);
+    const keySet = new Set(keys);
+    const inner = new LogisticRegression({ minConfidence: mc });
+    for (const r of rows) inner.addTrainingExample(_pruneTo(r.features, keySet), r.label);
+    return new FeatureSubsetModel(inner, keys);
   };
 
   const counts = { left: 0, right: 0 };
   for (const d of data) if (d.label in counts) counts[d.label]++;
+  const totalFeatures = rankFeatures(data).length;
 
-  // Too little data to trust a comparison — use interpretable k-NN.
+  // Too little data to trust any comparison — use interpretable all-feature k-NN.
   if (counts.left < 5 || counts.right < 5) {
-    return { model: buildKNN(data, minConfidence), name: "knn", knnAccuracy: null, lrAccuracy: null, accuracy: null };
+    return {
+      model: buildKNN(data, Infinity, minConfidence),
+      name: "knn",
+      accuracy: null,
+      featureCount: totalFeatures,
+      baselineAccuracy: null,
+    };
   }
 
-  const knnAccuracy = _accuracyCV(data, (rows) => buildKNN(rows, 0));
-  const lrAccuracy = _accuracyCV(data, (rows) => buildLR(rows, 0));
+  // Baseline: all-feature k-NN (the safe default we must clearly beat to switch).
+  const baselineAccuracy = _accuracyCV(data, (rows) => buildKNN(rows, Infinity, 0));
 
-  // Switch to LR only if it's clearly better (>2 percentage points). Otherwise
-  // keep k-NN for its interpretability ("here are the nearest real trips").
-  const useLR = lrAccuracy != null && knnAccuracy != null && lrAccuracy > knnAccuracy + 0.02;
+  // Candidate feature counts to try (top-K by class separation).
+  const candidateKs = [...new Set([6, 10, 16, totalFeatures])]
+    .filter((k) => k >= 3 && k <= totalFeatures)
+    .sort((a, b) => a - b);
+
+  let bestAlt = null; // best non-baseline combination
+  for (const K of candidateKs) {
+    for (const cand of [
+      { name: "knn", build: buildKNN },
+      { name: "logreg", build: buildLR },
+    ]) {
+      const acc = _accuracyCV(data, (rows) => cand.build(rows, K, 0));
+      if (acc != null && (!bestAlt || acc > bestAlt.acc)) {
+        bestAlt = { name: cand.name, K, acc, build: cand.build };
+      }
+    }
+  }
+
+  const switchOver =
+    bestAlt != null && baselineAccuracy != null && bestAlt.acc > baselineAccuracy + 0.02;
+
+  if (switchOver) {
+    return {
+      model: bestAlt.build(data, bestAlt.K, minConfidence),
+      name: bestAlt.name,
+      accuracy: bestAlt.acc,
+      featureCount: bestAlt.K,
+      baselineAccuracy,
+    };
+  }
   return {
-    model: useLR ? buildLR(data, minConfidence) : buildKNN(data, minConfidence),
-    name: useLR ? "logreg" : "knn",
-    knnAccuracy,
-    lrAccuracy,
-    accuracy: useLR ? lrAccuracy : knnAccuracy,
+    model: buildKNN(data, Infinity, minConfidence),
+    name: "knn",
+    accuracy: baselineAccuracy,
+    featureCount: totalFeatures,
+    baselineAccuracy,
   };
 }
 
