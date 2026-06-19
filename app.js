@@ -977,6 +977,7 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-secondary");
     ui.recordBtn.classList.add("btn-danger");
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
+    document.body.classList.add("recording");   // disable touch on charts (CSS)
     setSessionState("Recording\u2026");
     ui.clearBtn.disabled = true;
 
@@ -1005,6 +1006,7 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-danger");
     ui.recordBtn.classList.add("btn-secondary");
     ui.sessionState.classList.remove("recording");
+    document.body.classList.remove("recording");   // re-enable touch on charts (CSS)
 
     // Hide live forecast card (Phase 2)
     ui.liveForcastCard.classList.add("hidden");

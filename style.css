@@ -618,6 +618,12 @@ canvas {
   touch-action: pan-y;     /* page still scrolls when a drag starts on a chart */
 }
 
+/* During recording: disable all touch interaction on charts to prevent rAF
+   blocking. This ensures smooth rendering even if the user touches or scrolls. */
+body.recording canvas {
+  touch-action: none;
+}
+
 /* ------------------------------------------------------------
    Landscape phones: shrink charts and widen the shell so both
    charts remain usable in a ~375px-tall viewport.
