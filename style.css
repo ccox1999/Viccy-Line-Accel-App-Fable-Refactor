@@ -288,30 +288,68 @@ body {
   text-align: center;
 }
 
-.forecast-platform {
-  font-size: 32px;
-  font-weight: 700;
-  margin: 8px 0;
+/* Podium-style two-position forecast layout */
+.forecast-podium {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
-.forecast-confidence {
+.forecast-position {
+  padding: 14px;
+  background: #1a1f2e;
+  border-radius: 10px;
+  border: 1px solid #262833;
+  transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55); /* bouncy podium swap */
+}
+
+.forecast-position-top {
+  order: 1;
+}
+
+.forecast-position-bottom {
+  order: 2;
+  opacity: 0.6;
+}
+
+/* When bottom position is leading, swap order with animation */
+.forecast-podium.swap-order .forecast-position-top {
+  order: 2;
+  opacity: 0.6;
+}
+
+.forecast-podium.swap-order .forecast-position-bottom {
+  order: 1;
+  opacity: 1;
+}
+
+.forecast-label {
   font-size: 14px;
-  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.forecast-label.platform-left {
+  color: var(--ax); /* red */
+}
+
+.forecast-label.platform-right {
+  color: var(--ay); /* green */
+}
+
+.forecast-percentage {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -1px;
 }
 
 .forecast-note {
   font-size: 12px;
   color: #6b7280;
-  margin-top: 8px;
-}
-
-/* Platform colours — applied to forecast + prediction-result text */
-.platform-left {
-  color: var(--ax); /* red */
-}
-
-.platform-right {
-  color: var(--ay); /* green */
+  margin-top: 4px;
 }
 
 /* Modal for labeling (CSP-safe, no inline styles) */

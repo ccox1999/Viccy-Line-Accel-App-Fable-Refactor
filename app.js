@@ -141,6 +141,7 @@ async function loadMLModules() {
     classifierBuiltFor: -1,   // trainSet.count() the cached classifier was built from
     lastPredictionAt: 0,      // timestamp of last live prediction (Phase 2)
     lastLivePrediction: null, // { label, confidence, neighbors } from Phase 2
+    lastDisplayedLeader: null,// which direction was on top last time (for podium animation)
   };
 
   // ---------- Small helpers ------------------------------------------------
@@ -485,7 +486,7 @@ async function loadMLModules() {
 
   /**
    * Phase 2: Make a live prediction from the last N seconds of data.
-   * Called every 5 seconds during recording.
+   * Called every 1 second during recording (throttled by renderFrame).
    */
   async function makeLivePrediction() {
     if (!state.trainSet || state.trainSet.count() < 5) return;
@@ -517,31 +518,60 @@ async function loadMLModules() {
       const prediction = state.classifier.predict(features);
       state.lastLivePrediction = prediction;
 
-      // Low confidence (or no usable examples): say so rather than commit to
-      // a coin-flip. prediction.label is null when the confidence gate trips.
-      if (!prediction.label) {
-        ui.forecastPlatform.textContent = "Not sure";
-        ui.forecastPlatform.classList.remove("platform-left", "platform-right");
-        ui.forecastConfidence.textContent = prediction.confidence
-          ? `Confidence: ${(prediction.confidence * 100).toFixed(0)}% (too low)`
-          : "Confidence: —";
-        ui.forecastNote.textContent = `${prediction.rawVotes.left}/${prediction.rawVotes.right} neighbors`;
-        return;
-      }
+      // Calculate percentages from raw votes
+      const totalVotes = prediction.rawVotes.left + prediction.rawVotes.right;
+      const leftPct = totalVotes > 0 ? (prediction.rawVotes.left / totalVotes) * 100 : 0;
+      const rightPct = totalVotes > 0 ? (prediction.rawVotes.right / totalVotes) * 100 : 0;
 
-      // Update UI (colour via class — the CSP forbids style attributes)
-      ui.forecastPlatform.textContent = prediction.label.toUpperCase();
-      ui.forecastPlatform.classList.toggle("platform-left", prediction.label === "left");
-      ui.forecastPlatform.classList.toggle("platform-right", prediction.label === "right");
-      ui.forecastConfidence.textContent = `Confidence: ${(
-        prediction.confidence * 100
-      ).toFixed(0)}%`;
-      ui.forecastNote.textContent = `${prediction.rawVotes.left}/${
-        prediction.rawVotes.right
-      } neighbors`;
+      // Determine which is leading (>50%)
+      const leader = leftPct > rightPct ? "left" : "right";
+      const leadingPct = Math.max(leftPct, rightPct);
+      const trailingPct = Math.min(leftPct, rightPct);
+      const trailingDir = leader === "left" ? "right" : "left";
+
+      // Update UI with podium-style layout
+      updateForecastPodium(leader, leadingPct, trailingDir, trailingPct);
+
+      // Update note with vote counts
+      ui.forecastNote.textContent = `${prediction.rawVotes.left}L / ${prediction.rawVotes.right}R`;
     } catch (err) {
       console.warn("[ML] Live prediction failed:", err);
     }
+  }
+
+  /**
+   * Update the forecast podium with leader at top, animation on swap.
+   */
+  function updateForecastPodium(leader, leadingPct, trailerDir, trailerPct) {
+    const podium = document.querySelector(".forecast-podium");
+    const topPos = document.getElementById("forecastTop");
+    const bottomPos = document.getElementById("forecastBottom");
+
+    // Determine if order should swap
+    const shouldSwap = state.lastDisplayedLeader && state.lastDisplayedLeader !== leader;
+    state.lastDisplayedLeader = leader;
+
+    if (shouldSwap) {
+      podium.classList.add("swap-order");
+      // Remove swap class after animation completes so next update can trigger again
+      setTimeout(() => {
+        podium.classList.remove("swap-order");
+      }, 500);
+    }
+
+    // Update top position (leading)
+    const topLabel = topPos.querySelector(".forecast-label");
+    const topPercentage = topPos.querySelector(".forecast-percentage");
+    topLabel.textContent = leader.toUpperCase();
+    topLabel.className = `forecast-label platform-${leader}`;
+    topPercentage.textContent = `${leadingPct.toFixed(1)}%`;
+
+    // Update bottom position (trailing)
+    const bottomLabel = bottomPos.querySelector(".forecast-label");
+    const bottomPercentage = bottomPos.querySelector(".forecast-percentage");
+    bottomLabel.textContent = trailerDir.toUpperCase();
+    bottomLabel.className = `forecast-label platform-${trailerDir}`;
+    bottomPercentage.textContent = `${trailerPct.toFixed(1)}%`;
   }
 
   /**
@@ -696,8 +726,8 @@ async function loadMLModules() {
       updateSessionInfo();
     }
 
-    // Phase 2: Live prediction every ~5 seconds during recording
-    if (state.recording && now - state.lastPredictionAt > 5000) {
+    // Phase 2: Live prediction every ~1 second during recording
+    if (state.recording && now - state.lastPredictionAt > 1000) {
       state.lastPredictionAt = now;
       makeLivePrediction(); // async, doesn't block render
     }
@@ -983,9 +1013,16 @@ async function loadMLModules() {
 
     // Show live forecast card (Phase 2), reset to its waiting state
     ui.liveForcastCard.classList.remove("hidden");
-    ui.forecastPlatform.textContent = "\u2014";
-    ui.forecastPlatform.classList.remove("platform-left", "platform-right");
-    ui.forecastConfidence.textContent = "Confidence: \u2014";
+    state.lastDisplayedLeader = null; // reset podium state
+    const podium = document.querySelector(".forecast-podium");
+    podium.classList.remove("swap-order");
+    document.querySelectorAll(".forecast-label").forEach(label => {
+      label.textContent = "\u2014";
+      label.className = "forecast-label";
+    });
+    document.querySelectorAll(".forecast-percentage").forEach(pct => {
+      pct.textContent = "\u2014";
+    });
     ui.forecastNote.textContent = "Waiting for data\u2026";
 
     hapticTick(15);

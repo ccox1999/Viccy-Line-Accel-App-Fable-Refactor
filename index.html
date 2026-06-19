@@ -144,8 +144,18 @@
         <h2 class="chart-title">Live Platform Forecast</h2>
       </div>
       <div class="forecast-body">
-        <div id="forecastPlatform" class="forecast-platform">&mdash;</div>
-        <div id="forecastConfidence" class="forecast-confidence">Confidence: &mdash;</div>
+        <div class="forecast-podium">
+          <!-- Top position (leading platform) -->
+          <div id="forecastTop" class="forecast-position forecast-position-top">
+            <div class="forecast-label"></div>
+            <div class="forecast-percentage"></div>
+          </div>
+          <!-- Bottom position (trailing platform) -->
+          <div id="forecastBottom" class="forecast-position forecast-position-bottom">
+            <div class="forecast-label"></div>
+            <div class="forecast-percentage"></div>
+          </div>
+        </div>
         <div id="forecastNote" class="forecast-note">Waiting for data&hellip;</div>
       </div>
     </section>
