@@ -139,6 +139,15 @@ async function loadMLModules() {
     lastStatsAt: 0,      // last counter-text update (rAF timestamp)
     watchdogId: null,    // "no sensor data" timer
     epochBase: Date.now() - performance.now(),
+    // Smallest observed (performance.now() - event.timeStamp). iOS QUEUES
+    // devicemotion events when the main thread is busy (e.g. during a scroll)
+    // and flushes them in a burst, so timestamping a sample when its handler
+    // runs collapses a whole burst onto one instant. event.timeStamp carries
+    // the reading's true creation time instead; this min-filtered offset maps
+    // that clock onto our performance.now() timeline (the minimum over samples
+    // is the pure clock difference, since handler delay is always ≥ 0). See
+    // motionTime().
+    motionTsOffset: null,
 
     // ML state (Phase 1 & 2)
     trainSet: null,           // TrainingSet instance (loaded on init)
@@ -895,21 +904,41 @@ async function loadMLModules() {
   // ---------- Custom scroll while recording --------------------------------
   //
   // Native iOS scrolling is run by the compositor and PARKS the main thread,
-  // which is the thread that delivers devicemotion events — so during a native
-  // scroll, samples get coalesced/dropped and the trace shows a gap.
+  // which is the thread that delivers devicemotion events. iOS QUEUES the
+  // readings while parked and flushes them in a burst on release — data
+  // integrity is guaranteed by timestamping each sample with its reading time
+  // (see motionTime), so even a burst lands on the correct timeline.
   //
-  // The fix: while recording, suppress native scrolling (preventDefault on a
-  // non-passive touchmove) and move the page ourselves with window.scrollBy().
-  // Our handler runs ON the main thread, so the thread never parks and the
-  // sensors keep streaming at full rate the whole time you drag.
+  // This scroller is the second half: while recording we suppress native
+  // scrolling (preventDefault on a non-passive touchmove) and move the page
+  // ourselves on the main thread (with inertia, so it still feels native).
+  // Because the thread never parks, the live chart doesn't freeze and the
+  // event queue never even builds up (it has a finite ~200-sample limit).
+  // Drag + inertia state. Velocity is in px/ms of scroll position.
   let scrollTouchLastY = null;
+  let scrollTouchLastT = 0;
   let scrollTouchId = null;
+  let scrollVel = 0;
+  let momentumRAF = null;
+
+  const SCROLL_FRICTION = 0.95;   // velocity retained per 16 ms during inertia
+  const SCROLL_MIN_VEL = 0.02;    // px/ms — below this, momentum stops
+
+  function stopMomentum() {
+    if (momentumRAF !== null) {
+      cancelAnimationFrame(momentumRAF);
+      momentumRAF = null;
+    }
+    scrollVel = 0;
+  }
 
   function recTouchStart(event) {
     const t = event.changedTouches[0];
     if (!t) return;
+    stopMomentum();                 // a new touch grabs the page mid-fling
     scrollTouchId = t.identifier;
     scrollTouchLastY = t.clientY;
+    scrollTouchLastT = event.timeStamp || performance.now();
   }
 
   function recTouchMove(event) {
@@ -921,23 +950,51 @@ async function loadMLModules() {
     }
     if (!t) return;
 
+    const now = event.timeStamp || performance.now();
     const dy = t.clientY - scrollTouchLastY;
+    const dt = now - scrollTouchLastT;
     scrollTouchLastY = t.clientY;
+    scrollTouchLastT = now;
 
     // Kill the native scroll (which would park the main thread) and do it
     // ourselves on the main thread so devicemotion keeps firing.
     event.preventDefault();
     window.scrollBy(0, -dy);
+
+    // Track velocity (EMA) so a flick carries momentum on release.
+    if (dt > 0) {
+      const v = -dy / dt;
+      scrollVel = scrollVel * 0.7 + v * 0.3;
+    }
   }
 
   function recTouchEnd(event) {
+    let ended = false;
     for (const touch of event.changedTouches) {
-      if (touch.identifier === scrollTouchId) {
-        scrollTouchLastY = null;
-        scrollTouchId = null;
-        return;
-      }
+      if (touch.identifier === scrollTouchId) { ended = true; break; }
     }
+    if (!ended) return;
+    scrollTouchLastY = null;
+    scrollTouchId = null;
+    if (Math.abs(scrollVel) > SCROLL_MIN_VEL) startMomentum();
+    else scrollVel = 0;
+  }
+
+  function startMomentum() {
+    let last = performance.now();
+    const step = (now) => {
+      const dt = now - last;
+      last = now;
+      // Exponential friction, frame-rate independent.
+      scrollVel *= Math.pow(SCROLL_FRICTION, dt / 16);
+      if (Math.abs(scrollVel) < SCROLL_MIN_VEL) { momentumRAF = null; return; }
+      const before = window.scrollY;
+      window.scrollBy(0, scrollVel * dt);
+      // Hit the top/bottom — no rubber-band, just stop.
+      if (window.scrollY === before) { momentumRAF = null; scrollVel = 0; return; }
+      momentumRAF = requestAnimationFrame(step);
+    };
+    momentumRAF = requestAnimationFrame(step);
   }
 
   function enableRecordingScroll() {
@@ -953,11 +1010,29 @@ async function loadMLModules() {
     document.removeEventListener("touchmove", recTouchMove, { passive: false });
     document.removeEventListener("touchend", recTouchEnd, { passive: true });
     document.removeEventListener("touchcancel", recTouchEnd, { passive: true });
+    stopMomentum();
     scrollTouchLastY = null;
     scrollTouchId = null;
   }
 
   // ---------- Motion capture -----------------------------------------------
+
+  // True reading time for a devicemotion event, on the performance.now()
+  // timeline. event.timeStamp is set when the reading is created (not when its
+  // handler finally runs), so queued/burst-flushed samples keep their real
+  // spacing. We map it onto our clock with a min-filtered offset: the smallest
+  // (now - timeStamp) seen is the pure clock difference, because any handler
+  // delay only ever adds to that difference. Falls back to performance.now()
+  // if a UA doesn't provide a usable timeStamp.
+  function motionTime(event) {
+    const ets = event.timeStamp;
+    if (!Number.isFinite(ets) || ets <= 0) return performance.now();
+    const delta = performance.now() - ets;
+    if (state.motionTsOffset === null || delta < state.motionTsOffset) {
+      state.motionTsOffset = delta;
+    }
+    return ets + state.motionTsOffset;
+  }
 
   function handleMotion(event) {
     if (!state.recording) return; // safety; listener is removed on stop anyway
@@ -966,8 +1041,14 @@ async function loadMLModules() {
     const rot = event.rotationRate; // iOS reports °/s (per spec)
     const aig = event.accelerationIncludingGravity;
 
+    // Reading time (not handler-run time) — see motionTime(). Guard monotonic
+    // so the buffer stays sorted for the binary-search window lookups.
+    let t = motionTime(event);
+    const prev = state.data.length ? state.data[state.data.length - 1].time : -Infinity;
+    if (t < prev) t = prev;
+
     state.data.push({
-      time: performance.now(), // monotonic — immune to clock changes
+      time: t,
       ax: acc?.x ?? 0,
       ay: acc?.y ?? 0,
       az: acc?.z ?? 0,
@@ -1047,6 +1128,7 @@ async function loadMLModules() {
     state.dataTrimmed = false;
     state.startTime = performance.now();
     state.recording = true;
+    state.motionTsOffset = null; // re-estimate the sensor-clock offset per trip
     state.lastPredictionAt = 0;
     state.lastLivePrediction = null;
     // Force a classifier rebuild for this trip. count() alone misses the case
