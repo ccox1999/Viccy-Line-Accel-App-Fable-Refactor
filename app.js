@@ -1331,6 +1331,37 @@ async function loadMLModules() {
 
   // ---------- Init ---------------------------------------------------------
 
+  // Ask the browser to make our storage DURABLE. By default iOS Safari treats
+  // script-writable storage (localStorage / IndexedDB / caches) as "best
+  // effort" and wipes ALL of it after ~7 days of not opening the app. A granted
+  // persist() upgrades it to "persistent", exempt from that automatic eviction.
+  // It's most reliably granted once the app is added to the Home Screen.
+  async function requestPersistentStorage() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) {
+        console.info("[Storage] Persistent Storage API not available in this browser.");
+        return;
+      }
+      const already = await navigator.storage.persisted();
+      const granted = already || (await navigator.storage.persist());
+      console.log(
+        `[Storage] Persistent storage ${granted ? "GRANTED" : "DENIED"}` +
+          `${already ? " (already persisted)" : ""}.` +
+          (granted ? "" : " On iOS, add the app to your Home Screen to get it granted.")
+      );
+      if (navigator.storage.estimate) {
+        const { usage, quota } = await navigator.storage.estimate();
+        if (Number.isFinite(usage) && Number.isFinite(quota)) {
+          console.log(
+            `[Storage] Using ${(usage / 1024).toFixed(0)} KB of ~${(quota / 1048576).toFixed(0)} MB.`
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("[Storage] persist() request failed:", err);
+    }
+  }
+
   async function init() {
     if (typeof DeviceMotionEvent === "undefined") {
       setPill("denied", "Motion sensors: not supported here");
@@ -1344,6 +1375,7 @@ async function loadMLModules() {
     }
 
     registerServiceWorker();
+    requestPersistentStorage(); // ask iOS not to evict our recordings
     setupResizeHandling();
     updateSessionInfo();
     resizeAllCanvases(); // also performs the first render

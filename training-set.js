@@ -54,13 +54,31 @@ export class TrainingSet {
    * Save training set to localStorage.
    */
   async save() {
-    const jsonStr = JSON.stringify(this.toJSON());
-    const sizeKB = new Blob([jsonStr]).size / 1024;
-
     try {
+      const jsonStr = JSON.stringify(this.toJSON());
       localStorage.setItem(this.storageKey, jsonStr);
+      const sizeKB = new Blob([jsonStr]).size / 1024;
       console.log(`[TrainingSet] Saved ${this.examples.length} examples to localStorage (${sizeKB.toFixed(1)} KB)`);
+      return;
     } catch (err) {
+      // Quota exceeded: raw motion data is the bulk of the payload. Drop it and
+      // retry so the recordings (features + labels) STILL persist across
+      // reloads — far better than losing everything. Raw data can always be
+      // re-captured or kept via the manual "Backup Data" export.
+      if (_isQuotaError(err)) {
+        try {
+          const lite = this.toJSON();
+          for (const ex of lite.examples) delete ex.rawMotionData;
+          localStorage.setItem(this.storageKey, JSON.stringify(lite));
+          console.warn(
+            "[TrainingSet] localStorage quota hit — saved WITHOUT raw motion data so the recordings still persist. Export a backup to keep raw data."
+          );
+          return;
+        } catch (err2) {
+          console.error("[TrainingSet] Save failed even without raw data:", err2);
+          throw err2;
+        }
+      }
       console.error("[TrainingSet] localStorage save failed:", err);
       throw err;
     }
@@ -365,4 +383,19 @@ export class TrainingSet {
  */
 export function generateRecordingId() {
   return `recording-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/**
+ * Detect a localStorage quota-exceeded error across browsers. Safari throws
+ * QUOTA_EXCEEDED_ERR (code 22); some older WebKit builds use code 1014 with
+ * name "NS_ERROR_DOM_QUOTA_REACHED".
+ */
+function _isQuotaError(err) {
+  return (
+    err &&
+    (err.name === "QuotaExceededError" ||
+      err.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+      err.code === 22 ||
+      err.code === 1014)
+  );
 }
