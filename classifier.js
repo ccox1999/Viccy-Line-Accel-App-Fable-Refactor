@@ -385,6 +385,249 @@ export class KNNClassifier {
 }
 
 /**
+ * L2-regularised logistic regression (binary: left = 1, right = 0).
+ *
+ * Better suited than k-NN to THIS problem: the decision is near-linear and
+ * sign-driven (world-frame yaw sign ≈ turn direction), the feature space is
+ * high-dimensional (~46) with mostly irrelevant, sign-blind features, and the
+ * dataset is tiny. LR learns a near-zero weight for the irrelevant features
+ * (so it doesn't suffer k-NN's curse of dimensionality) and outputs a
+ * calibrated probability directly — ideal for the live percentage readout.
+ *
+ * Exposes the SAME interface as KNNClassifier (addTrainingExample / predict /
+ * predictProbability / count) so the two are interchangeable.
+ */
+export class LogisticRegression {
+  constructor({ l2 = 1.0, lr = 0.2, iters = 800, minConfidence = 0 } = {}) {
+    this.l2 = l2;
+    this.lr = lr;
+    this.iters = iters;
+    this.minConfidence = minConfidence;
+    this.examples = [];
+    this.keys = null;
+    this.mean = {};
+    this.std = {};
+    this.w = {};
+    this.b = 0;
+    this._trained = false;
+  }
+
+  addTrainingExample(features, label, metadata = {}) {
+    if (!["left", "right"].includes(label)) {
+      throw new Error(`Invalid label: ${label}. Must be "left" or "right".`);
+    }
+    this.examples.push({ features: { ...features }, label, ...metadata });
+    this._trained = false;
+  }
+
+  count() {
+    return this.examples.length;
+  }
+
+  countByLabel() {
+    const counts = { left: 0, right: 0 };
+    for (const ex of this.examples) if (ex.label in counts) counts[ex.label]++;
+    return counts;
+  }
+
+  _ensureTrained() {
+    if (this._trained) return;
+    const ex = this.examples;
+    const n = ex.length;
+
+    // Feature keys = every finite numeric feature seen in training.
+    const keys = new Set();
+    for (const e of ex) {
+      for (const k in e.features) if (Number.isFinite(e.features[k])) keys.add(k);
+    }
+    this.keys = [...keys];
+
+    // Standardise each feature (z-score) so the L2 penalty is even-handed and
+    // gradient descent is well conditioned.
+    for (const k of this.keys) {
+      let s = 0;
+      for (const e of ex) s += e.features[k] ?? 0;
+      const m = s / n;
+      let sq = 0;
+      for (const e of ex) {
+        const d = (e.features[k] ?? 0) - m;
+        sq += d * d;
+      }
+      this.mean[k] = m;
+      this.std[k] = Math.max(1e-6, Math.sqrt(sq / n));
+    }
+
+    const y = ex.map((e) => (e.label === "left" ? 1 : 0));
+    const X = ex.map((e) => {
+      const v = {};
+      for (const k of this.keys) v[k] = ((e.features[k] ?? this.mean[k]) - this.mean[k]) / this.std[k];
+      return v;
+    });
+
+    for (const k of this.keys) this.w[k] = 0;
+    this.b = 0;
+
+    // Batch gradient descent on mean logistic loss + L2 (bias unregularised).
+    for (let it = 0; it < this.iters; it++) {
+      const gw = {};
+      for (const k of this.keys) gw[k] = 0;
+      let gb = 0;
+      for (let i = 0; i < n; i++) {
+        let z = this.b;
+        for (const k of this.keys) z += this.w[k] * X[i][k];
+        const p = _sigmoid(z);
+        const err = p - y[i];
+        for (const k of this.keys) gw[k] += err * X[i][k];
+        gb += err;
+      }
+      for (const k of this.keys) {
+        const grad = gw[k] / n + (this.l2 * this.w[k]) / n;
+        this.w[k] -= this.lr * grad;
+      }
+      this.b -= this.lr * (gb / n);
+    }
+
+    this._trained = true;
+  }
+
+  _probLeft(features) {
+    this._ensureTrained();
+    let z = this.b;
+    for (const k of this.keys) {
+      const raw = Number.isFinite(features[k]) ? features[k] : this.mean[k];
+      z += this.w[k] * ((raw - this.mean[k]) / this.std[k]);
+    }
+    return _sigmoid(z);
+  }
+
+  predictProbability(features) {
+    if (this.examples.length === 0) {
+      return { pLeft: 0.5, pRight: 0.5, neighbors: [], error: "No training examples" };
+    }
+    const p = this._probLeft(features);
+    return { pLeft: p, pRight: 1 - p, neighbors: [] };
+  }
+
+  predict(features) {
+    if (this.examples.length === 0) {
+      return { label: null, confidence: 0, neighbors: [], rawVotes: { left: 0, right: 0 }, error: "No training examples" };
+    }
+    const p = this._probLeft(features);
+    const label = p >= 0.5 ? "left" : "right";
+    const confidence = Math.max(p, 1 - p);
+    if (this.minConfidence > 0 && confidence < this.minConfidence) {
+      return { label: null, confidence, neighbors: [], rawVotes: { left: 0, right: 0 } };
+    }
+    return {
+      label,
+      confidence,
+      neighbors: [],
+      rawVotes: { left: p >= 0.5 ? 1 : 0, right: p < 0.5 ? 1 : 0 },
+    };
+  }
+}
+
+function _sigmoid(z) {
+  if (z < -30) return 0;
+  if (z > 30) return 1;
+  return 1 / (1 + Math.exp(-z));
+}
+
+/**
+ * Adaptive k for k-NN: the √n rule of thumb, forced odd (no ties) and clamped
+ * to a sensible range. Replaces the old fixed k=5 — too large for a handful of
+ * trips (washes out local structure), too small for a big set.
+ */
+export function adaptiveK(n) {
+  let k = Math.round(Math.sqrt(Math.max(1, n)));
+  if (k % 2 === 0) k += 1;
+  return Math.max(3, Math.min(15, Math.min(k, Math.max(1, n))));
+}
+
+/**
+ * Mean held-out accuracy over several random splits, for any model exposing
+ * predict(features).label. makeModel(trainRows) returns a trained model.
+ */
+function _accuracyCV(data, makeModel, repeats = 12, testFraction = 0.3) {
+  let total = 0;
+  let valid = 0;
+  for (let r = 0; r < repeats; r++) {
+    const shuffled = [...data];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const splitIdx = Math.ceil(shuffled.length * (1 - testFraction));
+    const train = shuffled.slice(0, splitIdx);
+    const test = shuffled.slice(splitIdx);
+    if (train.length < 2 || test.length < 1) continue;
+    // Need both classes in train for a meaningful fit.
+    if (!train.some((d) => d.label === "left") || !train.some((d) => d.label === "right")) continue;
+
+    const model = makeModel(train);
+    let correct = 0;
+    for (const t of test) if (model.predict(t.features).label === t.label) correct++;
+    total += correct / test.length;
+    valid++;
+  }
+  return valid > 0 ? total / valid : null;
+}
+
+/**
+ * Model selection: train both an (adaptive-k) k-NN and logistic regression,
+ * estimate each by repeated cross-validation on the user's OWN data, and return
+ * the better one trained on all examples. k-NN is the default — LR is only
+ * chosen when it beats k-NN by a clear margin — so this can never quietly
+ * regress, it only upgrades when LR is genuinely better here.
+ *
+ * @returns {{ model, name, knnAccuracy, lrAccuracy, accuracy }}
+ */
+export function selectBestModel(examples, minConfidence = 0.6) {
+  const usable = (examples || []).filter(
+    (e) => e.features && typeof e.features === "object" && !Array.isArray(e.features)
+  );
+  const data = usable.map((e) => ({
+    features: e.features,
+    label: e.label,
+    recordingId: e.recordingId,
+    timestamp: e.timestamp,
+  }));
+
+  const buildKNN = (rows, mc = 0) => {
+    const c = new KNNClassifier(adaptiveK(rows.length), mc);
+    for (const r of rows) c.addTrainingExample(r.features, r.label, { recordingId: r.recordingId, timestamp: r.timestamp });
+    return c;
+  };
+  const buildLR = (rows, mc = 0) => {
+    const m = new LogisticRegression({ minConfidence: mc });
+    for (const r of rows) m.addTrainingExample(r.features, r.label);
+    return m;
+  };
+
+  const counts = { left: 0, right: 0 };
+  for (const d of data) if (d.label in counts) counts[d.label]++;
+
+  // Too little data to trust a comparison — use interpretable k-NN.
+  if (counts.left < 5 || counts.right < 5) {
+    return { model: buildKNN(data, minConfidence), name: "knn", knnAccuracy: null, lrAccuracy: null, accuracy: null };
+  }
+
+  const knnAccuracy = _accuracyCV(data, (rows) => buildKNN(rows, 0));
+  const lrAccuracy = _accuracyCV(data, (rows) => buildLR(rows, 0));
+
+  // Switch to LR only if it's clearly better (>2 percentage points). Otherwise
+  // keep k-NN for its interpretability ("here are the nearest real trips").
+  const useLR = lrAccuracy != null && knnAccuracy != null && lrAccuracy > knnAccuracy + 0.02;
+  return {
+    model: useLR ? buildLR(data, minConfidence) : buildKNN(data, minConfidence),
+    name: useLR ? "logreg" : "knn",
+    knnAccuracy,
+    lrAccuracy,
+    accuracy: useLR ? lrAccuracy : knnAccuracy,
+  };
+}
+
+/**
  * Cross-validation helper: evaluate classifier on a held-out test set.
  *
  * Splits data into training and test sets, trains the classifier,

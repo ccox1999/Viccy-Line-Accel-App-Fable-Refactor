@@ -156,6 +156,7 @@ async function loadMLModules() {
     lastPredictionAt: 0,      // timestamp of last live prediction (Phase 2)
     lastLivePrediction: null, // { label, confidence, neighbors } from Phase 2
     lastDisplayedLeader: null,// which direction was on top last time (for podium animation)
+    selectedModelName: null,  // "knn" | "logreg" — chosen by cross-validation
   };
 
   // ---------- Small helpers ------------------------------------------------
@@ -265,24 +266,23 @@ async function loadMLModules() {
   }
 
   /**
-   * Build a fresh classifier from the current training set.
-   * Examples without a feature vector (old-format imports) are skipped.
+   * Build the best classifier for the current training set. selectBestModel
+   * cross-validates an adaptive-k k-NN against logistic regression on the
+   * user's own data and returns whichever wins (k-NN by default, LR only when
+   * clearly better). The chosen model gates low-confidence calls at 60%.
    */
   async function buildClassifier() {
     const ml = await loadMLModules();
     const trainSet = await ensureTrainSet();
-    // Live forecast only commits to a platform at ≥60% of the vote
-    // (a 4/1 split on k=5), so a borderline 3/2 shows as "Not sure" instead
-    // of a near-coin-flip guess.
-    const clf = new ml.classifier.KNNClassifier(5, 0.6);
-    for (const ex of trainSet.examples) {
-      if (!ex.features || typeof ex.features !== "object") continue;
-      clf.addTrainingExample(ex.features, ex.label, {
-        recordingId: ex.recordingId,
-        timestamp: ex.timestamp,
-      });
+    const sel = ml.classifier.selectBestModel(trainSet.examples, 0.6);
+    state.selectedModelName = sel.name;
+    if (sel.knnAccuracy != null && sel.lrAccuracy != null) {
+      console.log(
+        `[ML] model = ${sel.name} (kNN ${(sel.knnAccuracy * 100).toFixed(0)}% vs ` +
+          `logreg ${(sel.lrAccuracy * 100).toFixed(0)}% in cross-validation)`
+      );
     }
-    return clf;
+    return sel.model;
   }
 
   /**
@@ -291,25 +291,10 @@ async function loadMLModules() {
    * there are enough examples of each class for the estimate to mean anything.
    */
   function estimateAccuracy(ml, examples) {
-    const usable = examples.filter(
-      (ex) => ex.features && typeof ex.features === "object"
-    );
-    const counts = { left: 0, right: 0 };
-    for (const ex of usable) if (ex.label in counts) counts[ex.label]++;
-    if (counts.left < 5 || counts.right < 5) return null;
-
-    const data = usable.map((ex) => ({ features: ex.features, label: ex.label }));
-    const REPEATS = 15;
-    let sum = 0;
-    let valid = 0;
-    for (let i = 0; i < REPEATS; i++) {
-      const m = ml.classifier.evaluateCrossValidation(data, 5, 0.25);
-      if (m && Number.isFinite(m.accuracy)) {
-        sum += m.accuracy;
-        valid++;
-      }
-    }
-    return valid > 0 ? sum / valid : null;
+    // Honest accuracy of the model the app will actually use: selectBestModel
+    // cross-validates both candidates and reports the winner's accuracy.
+    const sel = ml.classifier.selectBestModel(examples, 0.6);
+    return sel.accuracy ?? null;
   }
 
   /**
@@ -539,7 +524,10 @@ async function loadMLModules() {
 
       updateForecastPodium(leftPct, rightPct);
 
-      ui.forecastNote.textContent = `based on ${proba.neighbors.length} nearest trips`;
+      ui.forecastNote.textContent =
+        state.selectedModelName === "logreg"
+          ? "logistic-regression estimate"
+          : `based on ${proba.neighbors.length} nearest trips`;
     } catch (err) {
       console.warn("[ML] Live prediction failed:", err);
     }
