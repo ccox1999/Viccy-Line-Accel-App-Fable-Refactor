@@ -657,6 +657,22 @@ body {
 .legend-item.beta  { color: var(--beta); }
 .legend-item.gamma { color: var(--gamma); }
 
+/* ------------------------------------------------------------
+   While recording we run our OWN scroller on the main thread (see
+   enableRecordingScroll in app.js). touch-action:none routes all
+   touch panning through JS so preventDefault() reliably cancels the
+   native scroll — which is what keeps the main thread alive and the
+   sensors streaming. The page still scrolls (via window.scrollBy),
+   it just isn't the compositor doing it. No overflow:hidden here —
+   that would block programmatic scrolling too.
+   ------------------------------------------------------------ */
+body.recording,
+body.recording * {
+  /* Descendants too: the canvas sets its own touch-action: pan-y, which would
+     otherwise let a drag starting on a chart trigger a native scroll. */
+  touch-action: none;
+}
+
 /* Canvas */
 
 canvas {
@@ -669,21 +685,6 @@ canvas {
   touch-action: pan-y;     /* page still scrolls when a drag starts on a chart */
 }
 
-/* ------------------------------------------------------------
-   During recording, lock the page from scrolling.
-
-   On iOS a scroll gesture hands the main thread to the compositor,
-   which pauses BOTH requestAnimationFrame and devicemotion delivery.
-   That stalls the chart AND drops sensor samples, so on release the
-   trace draws a straight line across the gap. Disabling scroll (here
-   in CSS, plus a non-passive touchmove guard in app.js) keeps the
-   main thread free so sampling and drawing never stall.
-   ------------------------------------------------------------ */
-body.recording {
-  overflow: hidden;
-  touch-action: none;
-  overscroll-behavior: none;
-}
 
 /* ------------------------------------------------------------
    Landscape phones: shrink charts and widen the shell so both

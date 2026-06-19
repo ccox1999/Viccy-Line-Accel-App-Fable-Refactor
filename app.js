@@ -50,6 +50,11 @@ async function loadMLModules() {
   const STATS_UPDATE_MS = 150;     // throttle for the text counters
   const SENSOR_WATCHDOG_MS = 2500; // "no data arriving" warning delay
   const GRAVITY = 9.81;            // m/s² per g
+  // Normal samples arrive ~16–20 ms apart. A gap far larger than that means
+  // the OS stopped delivering samples (e.g. iOS parks the main thread during
+  // a scroll). Break the trace across such gaps instead of drawing a
+  // misleading straight line through data that was never captured.
+  const SENSOR_GAP_MS = 250;
 
   // Series definitions — colours kept in sync with style.css variables.
   const ACCEL_CHART = {
@@ -771,6 +776,7 @@ async function loadMLModules() {
 
     let started = false;
     let lastX = -Infinity;
+    let lastTime = null;
     const lastIndex = data.length - 1;
 
     for (let i = firstIndex; i <= lastIndex; i += 1) {
@@ -779,8 +785,17 @@ async function loadMLModules() {
       if (!Number.isFinite(value)) {
         // Bad sample: break the line rather than drawing garbage.
         started = false;
+        lastTime = null;
         continue;
       }
+
+      // Honest discontinuity: if the OS dropped samples (a big time gap, e.g.
+      // during an iOS scroll), break the trace instead of bridging the hole
+      // with a flat line that implies data we never recorded.
+      if (lastTime !== null && data[i].time - lastTime > SENSOR_GAP_MS) {
+        started = false;
+      }
+      lastTime = data[i].time;
 
       const x = toX(data[i].time);
 
@@ -877,13 +892,69 @@ async function loadMLModules() {
     ui.duration.textContent = `${seconds.toFixed(1)} s`;
   }
 
-  // Block page scrolling while recording. Must be a NON-passive listener so
-  // preventDefault() is honoured; defined once so add/remove pair up exactly.
-  // (CSS touch-action:none on body.recording covers most cases; this is the
-  // belt-and-braces guard for iOS, where a scroll otherwise parks the main
-  // thread and drops sensor samples.)
-  function blockScroll(event) {
+  // ---------- Custom scroll while recording --------------------------------
+  //
+  // Native iOS scrolling is run by the compositor and PARKS the main thread,
+  // which is the thread that delivers devicemotion events — so during a native
+  // scroll, samples get coalesced/dropped and the trace shows a gap.
+  //
+  // The fix: while recording, suppress native scrolling (preventDefault on a
+  // non-passive touchmove) and move the page ourselves with window.scrollBy().
+  // Our handler runs ON the main thread, so the thread never parks and the
+  // sensors keep streaming at full rate the whole time you drag.
+  let scrollTouchLastY = null;
+  let scrollTouchId = null;
+
+  function recTouchStart(event) {
+    const t = event.changedTouches[0];
+    if (!t) return;
+    scrollTouchId = t.identifier;
+    scrollTouchLastY = t.clientY;
+  }
+
+  function recTouchMove(event) {
+    if (scrollTouchLastY === null) return;
+    // Track the same finger that started the drag.
+    let t = null;
+    for (const touch of event.touches) {
+      if (touch.identifier === scrollTouchId) { t = touch; break; }
+    }
+    if (!t) return;
+
+    const dy = t.clientY - scrollTouchLastY;
+    scrollTouchLastY = t.clientY;
+
+    // Kill the native scroll (which would park the main thread) and do it
+    // ourselves on the main thread so devicemotion keeps firing.
     event.preventDefault();
+    window.scrollBy(0, -dy);
+  }
+
+  function recTouchEnd(event) {
+    for (const touch of event.changedTouches) {
+      if (touch.identifier === scrollTouchId) {
+        scrollTouchLastY = null;
+        scrollTouchId = null;
+        return;
+      }
+    }
+  }
+
+  function enableRecordingScroll() {
+    // touchmove must be non-passive so preventDefault() is honoured.
+    document.addEventListener("touchstart", recTouchStart, { passive: true });
+    document.addEventListener("touchmove", recTouchMove, { passive: false });
+    document.addEventListener("touchend", recTouchEnd, { passive: true });
+    document.addEventListener("touchcancel", recTouchEnd, { passive: true });
+  }
+
+  function disableRecordingScroll() {
+    document.removeEventListener("touchstart", recTouchStart, { passive: true });
+    document.removeEventListener("touchmove", recTouchMove, { passive: false });
+    document.removeEventListener("touchend", recTouchEnd, { passive: true });
+    document.removeEventListener("touchcancel", recTouchEnd, { passive: true });
+    scrollTouchLastY = null;
+    scrollTouchId = null;
   }
 
   // ---------- Motion capture -----------------------------------------------
@@ -999,8 +1070,10 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-secondary");
     ui.recordBtn.classList.add("btn-danger");
     ui.sessionState.classList.add("recording"); // pulsing red dot (CSS)
-    document.body.classList.add("recording");   // lock scroll (CSS)
-    document.addEventListener("touchmove", blockScroll, { passive: false });
+    document.body.classList.add("recording");   // route panning through JS (CSS)
+    // Take over scrolling on the main thread so the page still scrolls but the
+    // sensors never stall (see enableRecordingScroll).
+    enableRecordingScroll();
     setSessionState("Recording\u2026");
     ui.clearBtn.disabled = true;
 
@@ -1024,6 +1097,8 @@ async function loadMLModules() {
   async function stopRecording() {
     state.recording = false;
     window.removeEventListener("devicemotion", handleMotion);
+    disableRecordingScroll();                      // restore native scrolling
+    document.body.classList.remove("recording");   // restore native touch-action
 
     if (state.watchdogId !== null) {
       clearTimeout(state.watchdogId);
@@ -1034,8 +1109,6 @@ async function loadMLModules() {
     ui.recordBtn.classList.remove("btn-danger");
     ui.recordBtn.classList.add("btn-secondary");
     ui.sessionState.classList.remove("recording");
-    document.body.classList.remove("recording");   // re-enable scroll (CSS)
-    document.removeEventListener("touchmove", blockScroll, { passive: false });
 
     // Hide live forecast card (Phase 2)
     ui.liveForcastCard.classList.add("hidden");

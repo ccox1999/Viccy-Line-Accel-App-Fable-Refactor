@@ -11,7 +11,7 @@
 
 "use strict";
 
-const CACHE_VERSION = "motion-lab-v13";
+const CACHE_VERSION = "motion-lab-v14";
 
 // Everything the app needs to boot with no network at all.
 const APP_SHELL = [
