@@ -376,7 +376,8 @@ async function loadMLModules() {
         const accD = toDevice(R, [sign * 0.3, 0, 0]);
         const gD = toDevice(R, [0, 0, 9.81]);
         const noise = (scale) => (Math.random() - 0.5) * 2 * scale;
-        return Array.from({ length: 3000 }, () => ({
+        // Approach turn: a sustained world-vertical yaw + lateral push.
+        const moving = Array.from({ length: 3000 }, () => ({
           ax: accD[0] + noise(1),
           ay: accD[1] + noise(1),
           az: accD[2] + noise(1),
@@ -388,6 +389,24 @@ async function loadMLModules() {
           gy: gD[1] + noise(0.05),
           gz: gD[2] + noise(0.05),
         }));
+        // Brixton terminus stop: a stationary tail (≈0 accel, ≈0 rotation, same
+        // orientation) so extractForkFeatures' route-anchored selector has a
+        // final stop to lock onto, exactly like a real trip. Without it, fake
+        // trips would have no terminal stop, drop to the yaw-amplitude fallback,
+        // and form their own little feature cluster — the train/inference
+        // mismatch the shared extractor exists to prevent.
+        const stopped = Array.from({ length: 720 }, () => ({
+          ax: noise(0.05),
+          ay: noise(0.05),
+          az: noise(0.05),
+          rotationAlpha: noise(1),
+          rotationBeta: noise(1),
+          rotationGamma: noise(1),
+          gx: gD[0] + noise(0.05),
+          gy: gD[1] + noise(0.05),
+          gz: gD[2] + noise(0.05),
+        }));
+        return [...moving, ...stopped];
       };
 
       const fv = ml.features.FEATURE_VERSION;

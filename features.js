@@ -17,12 +17,17 @@
 
 /**
  * Feature-extraction version. Bumped whenever the MEANING of the feature vector
- * changes (here: from whole-recording aggregates to a fork-localised window).
+ * changes:
+ *   v2 — whole-recording aggregates → a fork-localised window chosen by the
+ *        largest |mean world-yaw|.
+ *   v3 — that window is now ROUTE-ANCHORED to the Brixton terminus stop (see
+ *        extractForkFeatures), falling back to the v2 yaw-amplitude selector
+ *        only when no clean terminal stop is present.
  * Stored examples keep their raw motion data, so TrainingSet.reprocessFeatures
  * can transparently re-extract them to the current definition instead of
  * silently mixing two incompatible feature scales in one training set.
  */
-export const FEATURE_VERSION = 2;
+export const FEATURE_VERSION = 3;
 
 /** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
 export const FORK_WINDOW_SEC = 10;
@@ -37,6 +42,26 @@ export const FORK_WINDOW_SEC = 10;
  * locks onto the sustained fork rotation rather than the edge of a jerk.
  */
 const FORK_YAW_SELECT_CLIP = 30;
+
+/**
+ * Route-anchor thresholds for locating the fork window (see extractForkFeatures).
+ *
+ * The journey is a fixed Stockwell→Brixton run that ALWAYS ends by stopping at
+ * the Brixton terminus, and the fork is the last sustained turn on the approach.
+ * So the fork window is the one ending where the train makes its final stop —
+ * found by POSITION in the journey, not by yaw amplitude. That is robust to the
+ * two things that defeat amplitude-based selection: hand jerks (100× the gentle
+ * fork yaw) and the large route curve that BOTH platforms share.
+ *
+ * STATIONARY_ACCEL_RMS — horizontal-accel RMS (m/s², gravity-projected) below
+ *   which the train is treated as stopped. On real data the moving train sits at
+ *   ~0.4–0.9 and the terminus dwell at ~0.09, so 0.2 separates them cleanly.
+ *   Device/calibration dependent — retune if the accelerometer scale differs.
+ * MIN_TERMINAL_STOP_SEC — a qualifying terminus stop must be at least this long,
+ *   so a brief between-stations crawl cannot masquerade as the final arrival.
+ */
+const STATIONARY_ACCEL_RMS = 0.2;
+const MIN_TERMINAL_STOP_SEC = 8;
 
 /**
  * Extract features from a motion data window.
@@ -309,13 +334,22 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
  *     but ~zero-mean (a gesture rotates out and back), so it dominates the peak
  *     while contributing nothing to a windowed mean.
  *
- * So we slide a fixed-length window across the recording and score each
- * position by the MAGNITUDE of its mean world-frame yaw rate — exactly the
- * quantity that is large during the sustained fork turn and ≈0 over straight
- * track or a round-trip hand gesture — then extract the full feature vector
+ * PRIMARY (v3) — ROUTE ANCHOR. The route is fixed: every recording is a
+ * Stockwell→Brixton run that ends by stopping at the Brixton terminus, and the
+ * fork is the last sustained turn on the approach. So the fork window is simply
+ * the one ENDING where the train comes to its final stop. We detect that stop
+ * from the orientation-invariant horizontal-acceleration level (gravity-
+ * projected) and take the window just before it. Anchoring by POSITION in the
+ * journey — not by yaw amplitude — is robust to hand jerks (which can be 100×
+ * the fork yaw) and to the large route curve that both platforms share.
+ *
+ * FALLBACK (v2 behaviour) — when there is no clean terminal stop (recording cut
+ * short, or only mid-route signal holds), slide a fixed-length window and score
+ * each position by the MAGNITUDE of its mean world-frame yaw rate, then extract
  * from the best-scoring window. Selecting by |mean yaw| concentrates the signal
- * while preserving its SIGN (left vs right), which is what actually separates
- * the two platforms.
+ * while preserving its SIGN (left vs right). The yaw is CLIPPED to the train-yaw
+ * ceiling for scoring only (features still come from the RAW slice) so a brief
+ * high-amplitude hand jerk cannot outscore the real, gentler fork rotation.
  *
  * Using the SAME function for the saved training example and for the live
  * forecast keeps their feature distributions matched. (Training on
@@ -338,22 +372,23 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
   const w = Math.round(windowSec * sampleRateHz);
   if (w < 2 || n <= w) return extractFeatures(motionData, sampleRateHz);
 
-  // Per-sample world-frame yaw rate (0 where gravity is unusable) plus a
-  // validity mask, accumulated as prefix sums so each window mean is O(1).
-  // The yaw projection mirrors extractFeatures exactly: rotation-rate vector
-  // (beta, gamma, alpha) dotted with the gravity unit vector. The yaw is
-  // CLIPPED to the train-yaw ceiling before accumulation — this is a selection
-  // statistic only (the chosen window's features are still extracted from the
-  // RAW slice), and the clip is what stops a brief high-amplitude hand jerk
-  // clipped at a window edge from outscoring the real, gentler fork rotation.
+  // Per-sample, orientation-invariant prefix sums (all O(1) to window):
+  //  - prefYaw:     CLIPPED world-frame yaw rate, for the amplitude fallback.
+  //                 Projection mirrors extractFeatures exactly: rotation-rate
+  //                 vector (beta, gamma, alpha) dotted with the gravity unit
+  //                 vector; clip caps hand jerks (see FORK_YAW_SELECT_CLIP).
+  //  - prefHorizSq: squared horizontal acceleration (the component ⟂ gravity),
+  //                 for terminal-stop detection — braking/cornering live here,
+  //                 track roughness is vertical and excluded.
+  //  - prefValid:   gravity-usable sample count, so old data degrades to zeros.
   const prefYaw = new Float64Array(n + 1);
+  const prefHorizSq = new Float64Array(n + 1);
   const prefValid = new Int32Array(n + 1);
   for (let i = 0; i < n; i++) {
     const s = motionData[i];
     const gx = s.gx ?? 0, gy = s.gy ?? 0, gz = s.gz ?? 0;
     const gMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
-    let yaw = 0;
-    let valid = 0;
+    let yaw = 0, horizSq = 0, valid = 0;
     if (gMag >= 4 && gMag <= 20) {
       const ux = gx / gMag, uy = gy / gMag, uz = gz / gMag;
       const rawYaw =
@@ -361,15 +396,27 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
         (s.rotationGamma ?? 0) * uy +
         (s.rotationAlpha ?? 0) * uz;
       yaw = clamp(rawYaw, -FORK_YAW_SELECT_CLIP, FORK_YAW_SELECT_CLIP);
+      const ax = s.ax ?? 0, ay = s.ay ?? 0, az = s.az ?? 0;
+      const vert = ax * ux + ay * uy + az * uz;
+      const hx = ax - vert * ux, hy = ay - vert * uy, hz = az - vert * uz;
+      horizSq = hx * hx + hy * hy + hz * hz;
       valid = 1;
     }
     prefYaw[i + 1] = prefYaw[i] + yaw;
+    prefHorizSq[i + 1] = prefHorizSq[i] + horizSq;
     prefValid[i + 1] = prefValid[i] + valid;
   }
 
   // Not enough gravity samples anywhere (old data) → whole-recording fallback.
   if (prefValid[n] < w * 0.5) return extractFeatures(motionData, sampleRateHz);
 
+  // PRIMARY: route-anchored window ending at the Brixton terminus stop.
+  const anchored = anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz);
+  if (anchored >= 0) {
+    return extractFeatures(motionData.slice(anchored, anchored + w), sampleRateHz);
+  }
+
+  // FALLBACK: largest |mean clipped world-yaw| window (the v2 selector).
   const stride = Math.max(1, Math.round(sampleRateHz / 4)); // ~0.25 s steps
   const minValid = w * 0.5; // window must be at least half gravity-valid
   let bestStart = -1;
@@ -386,6 +433,57 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
 
   if (bestStart < 0) return extractFeatures(motionData, sampleRateHz);
   return extractFeatures(motionData.slice(bestStart, bestStart + w), sampleRateHz);
+}
+
+/**
+ * Locate the fork window by anchoring to the train's final stop at Brixton.
+ *
+ * Returns the START index of a `w`-sample window ending where the train comes
+ * to rest, or -1 if no clean terminal stop is found (the caller then falls back
+ * to the yaw-amplitude selector).
+ *
+ * A "stop" is a stretch of at least MIN_TERMINAL_STOP_SEC whose mean horizontal
+ * acceleration sits below STATIONARY_ACCEL_RMS. We scan from the END so we lock
+ * onto the LAST stop (the terminus), not a mid-route signal hold, then walk back
+ * to where motion actually ceased — the window's end. The window immediately
+ * before the stop must itself contain motion; if it is quiet too, this stop
+ * follows another stop (e.g. standing on the platform after alighting) and the
+ * real approach is earlier, so we keep scanning.
+ *
+ * @param {Float64Array} prefHorizSq - prefix sums of squared horizontal accel
+ * @param {Int32Array} prefValid - prefix sums of gravity-valid samples
+ * @param {number} n - sample count
+ * @param {number} w - window length in samples
+ * @param {number} sampleRateHz - sampling rate
+ * @returns {number} window start index, or -1
+ */
+function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
+  const minStop = Math.max(2, Math.round(MIN_TERMINAL_STOP_SEC * sampleRateHz));
+  if (n < minStop) return -1;
+
+  // RMS of horizontal accel over [a, b); Infinity if too little gravity to judge.
+  const blockRms = (a, b) => {
+    const cnt = prefValid[b] - prefValid[a];
+    if (cnt < (b - a) * 0.5) return Infinity;
+    return Math.sqrt((prefHorizSq[b] - prefHorizSq[a]) / cnt);
+  };
+  // True if a stop of length minStop begins at c.
+  const isStop = (c) =>
+    c + minStop <= n && blockRms(c, c + minStop) < STATIONARY_ACCEL_RMS;
+
+  let c = n - minStop;
+  while (c >= 0) {
+    if (!isStop(c)) { c--; continue; }
+    // Walk down to the onset of this stationary stretch = the moment of rest.
+    let cease = c;
+    while (cease - 1 >= 0 && isStop(cease - 1)) cease--;
+    const winStart = cease - w;
+    if (winStart >= 0 && blockRms(winStart, cease) >= STATIONARY_ACCEL_RMS) {
+      return winStart;
+    }
+    c = cease - 1; // this stop is preceded by quiet (or runs off the start) — look earlier
+  }
+  return -1;
 }
 
 /**
