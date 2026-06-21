@@ -51,6 +51,47 @@ export class TrainingSet {
   }
 
   /**
+   * Re-extract feature vectors that were produced by an older feature-extractor
+   * version, in place, from each example's stored raw motion data.
+   *
+   * Feature extraction has changed several times in this project (e.g. removing
+   * the trajectory block, then localising to the fork window). Without this,
+   * old examples keep features on a different scale/definition than new ones,
+   * and the classifier silently compares apples to oranges. Because v3 examples
+   * carry their full rawMotionData, we can bring every recording up to the
+   * current definition transparently on load. Examples whose raw data was
+   * dropped (quota fallback, or v2 imports) are left untouched — their stale
+   * features are still better than discarding the recording.
+   *
+   * @param {(motionData:Array, rateHz:number)=>Object} extractFn - extractor (e.g. extractForkFeatures)
+   * @param {number} version - the current FEATURE_VERSION
+   * @param {number} sampleRateHz
+   * @returns {Promise<number>} how many examples were re-extracted
+   */
+  async reprocessFeatures(extractFn, version, sampleRateHz = 60) {
+    let changed = 0;
+    for (const ex of this.examples) {
+      if (ex.featureVersion === version) continue;
+      if (!Array.isArray(ex.rawMotionData) || ex.rawMotionData.length < 2) continue;
+      try {
+        ex.features = extractFn(ex.rawMotionData, sampleRateHz);
+        ex.featureVersion = version;
+        changed++;
+      } catch (err) {
+        console.warn(`[TrainingSet] Reprocess failed for ${ex.id}:`, err);
+      }
+    }
+    if (changed > 0) {
+      try {
+        await this.save();
+      } catch (err) {
+        console.warn("[TrainingSet] Save after reprocess failed:", err);
+      }
+    }
+    return changed;
+  }
+
+  /**
    * Save training set to localStorage.
    */
   async save() {
@@ -108,6 +149,7 @@ export class TrainingSet {
     this.examples.push({
       id,
       features: { ...features },
+      featureVersion: metadata.featureVersion, // which extractor produced `features`
       label,
       timestamp: metadata.timestamp || Date.now(),
       recordingId: metadata.recordingId || id,
@@ -184,6 +226,7 @@ export class TrainingSet {
       examples: this.examples.map(ex => ({
         id: ex.id,
         features: ex.features,
+        featureVersion: ex.featureVersion,
         label: ex.label,
         timestamp: ex.timestamp,
         recordingId: ex.recordingId,
@@ -212,6 +255,7 @@ export class TrainingSet {
         usable.push({
           id: ex.id,
           features: ex.features,
+          featureVersion: ex.featureVersion, // undefined for pre-versioned data
           label: ex.label,
           timestamp: ex.timestamp,
           recordingId: ex.recordingId,

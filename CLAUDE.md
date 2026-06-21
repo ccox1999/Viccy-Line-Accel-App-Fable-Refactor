@@ -1,8 +1,8 @@
 # Victoria Line Motion Lab — Project Context
 
-## Current state (2026-06-14)
+## Current state (2026-06-21)
 
-**What it does:** A PWA for recording iPhone motion data (acceleration + rotation + gravity) on the Victoria Line, classifying which platform the train is heading for (left or right fork at Brixton) using k-NN with z-score normalization and Fisher-weighted features. Full inertial navigation (gyro integration + world-frame trajectory reconstruction) makes predictions robust to phone orientation and placement.
+**What it does:** A PWA for recording iPhone motion data (acceleration + rotation + gravity) on the Victoria Line, classifying which platform the train is heading for (left or right fork at Brixton) using k-NN / logistic regression (auto-selected by CV) with z-score normalization and Fisher-weighted features. Orientation invariance comes from projecting each sample onto the per-sample gravity vector (no integration → no drift) — NOT from trajectory reconstruction (that was tried and removed; see below).
 
 **Data persistence:** All training data (features + full raw motion data) auto-persists to localStorage when you label a trip. Auto-backup to internal localStorage as fallback. Manual backup/restore via JSON download/import.
 
@@ -10,16 +10,20 @@
 
 **Key implementation details:**
 - `features.js`: ~25 features. The orientation-invariant left/right signal is `world_yaw_mean/peak` + `vert_accel_rms`/`horiz_accel_rms`, computed by projecting each sample onto the per-sample gravity vector (no integration → no drift). Plus device-frame time/frequency/statistical features (RMS, peak, skew, jerk, FFT bins, spectral entropy) that Fisher weighting down-weights when phone orientation varies between trips.
+- **Fork-localised extraction (`extractForkFeatures`) — the feature window matters more than the feature list.** The fork is a brief (~few-second), gentle (~a few °/s) sustained yaw buried in a recording that can run minutes; averaging `world_yaw_mean` over the whole trip dilutes it ~30× toward zero. So features are extracted from the single 10 s window with the largest |mean world-frame yaw|, not the whole recording. Window scoring CLIPS per-sample yaw to a physical train ceiling (`FORK_YAW_SELECT_CLIP = 30 °/s`) so a brief 100–400 °/s hand jerk clipped at a window edge can't outscore the real fork (this was caught in testing — an unclipped mean locked onto jerk edges, wrong sign). **Both** the saved training example **and** the live forecast call `extractForkFeatures`, so their feature distributions match (previously training used the whole recording while the live forecast used a trailing 10 s window — a silent train/inference mismatch). Falls back to whole-recording extraction for sub-window or gravity-less (old) data.
+- **Feature versioning + reprocessing.** `features.js` exports `FEATURE_VERSION`; each stored example records the version that produced its `features`. On load (and after Restore), `TrainingSet.reprocessFeatures` re-extracts any stale example from its stored `rawMotionData`, so changing the extractor never leaves a training set mixing two incompatible feature scales. (v3 examples carry full raw data precisely so this is possible.)
 - **REMOVED (do not re-add):** a full "inertial navigation / trajectory reconstruction" block (gyro→rotation-matrix integration + double-integrated position, with traj_curvature/range and world-frame jerk features). Its matrix update was mathematically wrong (corrupted R after step 1), and even corrected, doubly-integrated accelerometer position is a drift-dominated random walk — those features were noise. The gravity-projection features above are the correct way to get orientation invariance.
 - `classifier.js`: k-NN (k=5) with z-score normalization (stdDev floored at 0.01) + Fisher-style class-separation weighting (only engaged when ≥3 examples per class, else uniform). `predict()` takes an optional `minConfidence`; the live forecast uses 0.6 so a 3/2 split shows "Not sure" instead of a coin-flip.
 - Accuracy is estimated honestly via repeated (15×) held-out cross-validation after each label, shown in the save alert once there are ≥5 examples per class.
-- `training-set.js`: v3 format stores features + raw motion data + metadata per example.
-- Service worker cache (v12): offline support via app-shell pattern, now incl. icons. (Bump on every edit.)
+- `training-set.js`: v3 format stores features + raw motion data + metadata (incl. `featureVersion`) per example; `reprocessFeatures(extractFn, version)` re-extracts stale examples from raw data.
+- Service worker cache (v20): offline support via app-shell pattern, now incl. icons. (Bump on every edit.)
 - PWA-ready: installable to home screen, better storage persistence than bookmarked URL.
 
 **ML caveats / open questions:**
-- The underlying physical signal (which Brixton fork the train takes) is small and brief — a gentle low-speed switch near the terminus. `world_yaw` is the most likely discriminator. Real-world accuracy is unproven; the CV estimate after labeling is the source of truth.
+- The underlying physical signal (which Brixton fork the train takes) is small and brief — a gentle low-speed switch near the terminus. `world_yaw` is the most likely discriminator. Real-world accuracy is unproven; the CV estimate after labeling is the source of truth. `extractForkFeatures` now concentrates each example on that brief event instead of averaging it away, which should be the biggest accuracy lever short of more/better data — but it is still unproven on real trips.
 - Device-frame features only help if the phone is held consistently across trips; Fisher weighting is what's supposed to suppress them otherwise, but on tiny datasets that weighting is itself noisy. Fewer/better features may beat the current ~25-dim set — worth revisiting once real data exists.
+- **Sign ambiguity from carry direction** is not yet handled: world-frame yaw about gravity is invariant to which way the phone faces horizontally, so a left fork should read the same sign regardless of facing — but if a future device/axis convention flips the gravity sign, the left/right labels would swap. The classifier learns whatever is consistent within the user's own labelled set, so this only bites if carry/convention changes mid-dataset. Worth a held-out-session check once real data exists.
+- **Possible next step:** a matched-filter / shape feature on the (low-passed) yaw-rate transient through the crossover, which is what published IMU fork-detection methods use — likely stronger than the current aggregate mean/peak, but a bigger build. Deferred until real trips confirm the current approach.
 
 ---
 

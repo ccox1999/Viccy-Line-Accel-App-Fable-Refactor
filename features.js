@@ -16,6 +16,29 @@
 "use strict";
 
 /**
+ * Feature-extraction version. Bumped whenever the MEANING of the feature vector
+ * changes (here: from whole-recording aggregates to a fork-localised window).
+ * Stored examples keep their raw motion data, so TrainingSet.reprocessFeatures
+ * can transparently re-extract them to the current definition instead of
+ * silently mixing two incompatible feature scales in one training set.
+ */
+export const FEATURE_VERSION = 2;
+
+/** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
+export const FORK_WINDOW_SEC = 10;
+
+/**
+ * Physical ceiling (deg/s) for a TRAIN's yaw rate, used only to score candidate
+ * fork windows. Even a tight rail crossover at terminus speed yaws at ~20 °/s;
+ * the phone swinging in the hand hits 100–400 °/s (and a flick-and-return
+ * gesture carries more total rotation than the gentle fork, so it fools an
+ * unclipped windowed mean). Clipping each sample to this ceiling before scoring
+ * keeps all real train signal while defanging hand jerks, so the window search
+ * locks onto the sustained fork rotation rather than the edge of a jerk.
+ */
+const FORK_YAW_SELECT_CLIP = 30;
+
+/**
  * Extract features from a motion data window.
  *
  * @param {Array} motionWindow - [{time, ax, ay, az, rotationAlpha, rotationBeta, rotationGamma}, ...]
@@ -269,6 +292,100 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
   }
 
   return features;
+}
+
+/**
+ * Extract features from the most fork-like WINDOW of a recording, not the whole
+ * thing — the single most important thing this file does for accuracy.
+ *
+ * The left/right discriminator is a brief, gentle, SUSTAINED yaw about the world
+ * vertical as the train takes the scissors crossover near Brixton: only a few
+ * seconds out of a journey that can run minutes. Two facts make whole-recording
+ * aggregates the wrong tool for it:
+ *   - the fork yaw rate is small (order a few °/s at crossover speed), so a
+ *     `world_yaw_mean` averaged over the entire trip dilutes it ~30× toward
+ *     zero, and
+ *   - the phone moving in the hand produces yaw that is far LARGER in amplitude
+ *     but ~zero-mean (a gesture rotates out and back), so it dominates the peak
+ *     while contributing nothing to a windowed mean.
+ *
+ * So we slide a fixed-length window across the recording and score each
+ * position by the MAGNITUDE of its mean world-frame yaw rate — exactly the
+ * quantity that is large during the sustained fork turn and ≈0 over straight
+ * track or a round-trip hand gesture — then extract the full feature vector
+ * from the best-scoring window. Selecting by |mean yaw| concentrates the signal
+ * while preserving its SIGN (left vs right), which is what actually separates
+ * the two platforms.
+ *
+ * Using the SAME function for the saved training example and for the live
+ * forecast keeps their feature distributions matched. (Training on
+ * whole-recording features while predicting on a trailing 10 s window — the old
+ * behaviour — was a silent train/inference mismatch: length-dependent features
+ * such as energy and the diluted means simply did not line up.)
+ *
+ * Degrades gracefully: recordings shorter than one window, or old recordings
+ * with no usable gravity vector, fall back to whole-recording extraction.
+ *
+ * @param {Array} motionData - full recording
+ * @param {number} sampleRateHz - sampling rate
+ * @param {number} windowSec - window length in seconds
+ * @returns {Object} feature vector (same shape as extractFeatures)
+ */
+export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = FORK_WINDOW_SEC) {
+  if (!motionData || motionData.length < 2) return getNullFeatures();
+
+  const n = motionData.length;
+  const w = Math.round(windowSec * sampleRateHz);
+  if (w < 2 || n <= w) return extractFeatures(motionData, sampleRateHz);
+
+  // Per-sample world-frame yaw rate (0 where gravity is unusable) plus a
+  // validity mask, accumulated as prefix sums so each window mean is O(1).
+  // The yaw projection mirrors extractFeatures exactly: rotation-rate vector
+  // (beta, gamma, alpha) dotted with the gravity unit vector. The yaw is
+  // CLIPPED to the train-yaw ceiling before accumulation — this is a selection
+  // statistic only (the chosen window's features are still extracted from the
+  // RAW slice), and the clip is what stops a brief high-amplitude hand jerk
+  // clipped at a window edge from outscoring the real, gentler fork rotation.
+  const prefYaw = new Float64Array(n + 1);
+  const prefValid = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const s = motionData[i];
+    const gx = s.gx ?? 0, gy = s.gy ?? 0, gz = s.gz ?? 0;
+    const gMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
+    let yaw = 0;
+    let valid = 0;
+    if (gMag >= 4 && gMag <= 20) {
+      const ux = gx / gMag, uy = gy / gMag, uz = gz / gMag;
+      const rawYaw =
+        (s.rotationBeta ?? 0) * ux +
+        (s.rotationGamma ?? 0) * uy +
+        (s.rotationAlpha ?? 0) * uz;
+      yaw = clamp(rawYaw, -FORK_YAW_SELECT_CLIP, FORK_YAW_SELECT_CLIP);
+      valid = 1;
+    }
+    prefYaw[i + 1] = prefYaw[i] + yaw;
+    prefValid[i + 1] = prefValid[i] + valid;
+  }
+
+  // Not enough gravity samples anywhere (old data) → whole-recording fallback.
+  if (prefValid[n] < w * 0.5) return extractFeatures(motionData, sampleRateHz);
+
+  const stride = Math.max(1, Math.round(sampleRateHz / 4)); // ~0.25 s steps
+  const minValid = w * 0.5; // window must be at least half gravity-valid
+  let bestStart = -1;
+  let bestScore = -1;
+  for (let start = 0; start + w <= n; start += stride) {
+    const sv = prefValid[start + w] - prefValid[start];
+    if (sv < minValid) continue;
+    const score = Math.abs((prefYaw[start + w] - prefYaw[start]) / sv);
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = start;
+    }
+  }
+
+  if (bestStart < 0) return extractFeatures(motionData, sampleRateHz);
+  return extractFeatures(motionData.slice(bestStart, bestStart + w), sampleRateHz);
 }
 
 /**

@@ -261,6 +261,16 @@ async function loadMLModules() {
       const ml = await loadMLModules();
       state.trainSet = new ml.trainingSet.TrainingSet();
       await state.trainSet.load();
+      // Bring any examples saved by an older feature extractor up to the
+      // current definition (fork-localised windows), re-extracting from their
+      // stored raw motion data so the whole set is on one consistent scale.
+      const changed = await state.trainSet.reprocessFeatures(
+        ml.features.extractForkFeatures,
+        ml.features.FEATURE_VERSION
+      );
+      if (changed > 0) {
+        console.log(`[ML] Reprocessed ${changed} example(s) to feature v${ml.features.FEATURE_VERSION}`);
+      }
     }
     return state.trainSet;
   }
@@ -380,12 +390,18 @@ async function loadMLModules() {
         }));
       };
 
+      const fv = ml.features.FEATURE_VERSION;
       for (let i = 0; i < 5; i++) {
         const turnRate = 30 + i * 4; // 30–46 °/s, varied per example
-        const left = ml.features.extractFeatures(makeFakeTrip("left", turnRate), 60);
-        state.trainSet.add(left, "left", { notes: `Fake left ${i}` });
-        const right = ml.features.extractFeatures(makeFakeTrip("right", turnRate), 60);
-        state.trainSet.add(right, "right", { notes: `Fake right ${i}` });
+        // Route through the SAME extractor as real trips so fake and real
+        // examples share one feature scale (extractFeatures over a 50 s fake
+        // trip vs extractForkFeatures over a 10 s window differ in the
+        // length-dependent features — energy, FFT — which would otherwise make
+        // the fake data its own little cluster).
+        const left = ml.features.extractForkFeatures(makeFakeTrip("left", turnRate), 60);
+        state.trainSet.add(left, "left", { notes: `Fake left ${i}`, featureVersion: fv });
+        const right = ml.features.extractForkFeatures(makeFakeTrip("right", turnRate), 60);
+        state.trainSet.add(right, "right", { notes: `Fake right ${i}`, featureVersion: fv });
       }
 
       await state.trainSet.save();
@@ -485,8 +501,9 @@ async function loadMLModules() {
   }
 
   /**
-   * Phase 2: Make a live prediction from the last N seconds of data.
-   * Called every 1 second during recording (throttled by renderFrame).
+   * Phase 2: Make a live prediction from the most fork-like window seen so far
+   * (see extractForkFeatures). Called every 1 second during recording
+   * (throttled by renderFrame).
    */
   async function makeLivePrediction() {
     if (!state.trainSet || state.trainSet.count() < 5) return;
@@ -495,17 +512,13 @@ async function loadMLModules() {
     try {
       const ml = await loadMLModules();
 
-      // Get the last 10 seconds of data
-      const windowMs = 10000;
-      const latest = state.data[state.data.length - 1]?.time ?? 0;
-      const windowStart = latest - windowMs;
-      const idx = firstIndexAtOrAfter(state.data, windowStart);
-      const window = state.data.slice(idx);
-
-      if (window.length < 30) return;
-
-      // Extract features
-      const features = ml.features.extractFeatures(window, 60);
+      // Extract features from the most fork-like window found in the trip SO
+      // FAR — the same function (and therefore the same feature distribution)
+      // used to build the saved training examples. Once the real fork has
+      // happened its sustained yaw outscores everything else and the forecast
+      // locks onto it; before that it rides whatever window looks most turn-like
+      // and is held back by the 60% confidence gate.
+      const features = ml.features.extractForkFeatures(state.data, 60);
 
       // Build the classifier once per recording; rebuild only if the
       // training set has changed since (labelling happens between trips).
@@ -615,8 +628,11 @@ async function loadMLModules() {
       const ml = await loadMLModules();
       await ensureTrainSet();
 
-      // Extract features from the recording (lightweight storage)
-      const features = ml.features.extractFeatures(state.data, 60);
+      // Extract features from the FORK WINDOW of the recording, not the whole
+      // trip — the left/right signal is a brief sustained yaw that whole-trip
+      // averaging dilutes away (see extractForkFeatures). Same function the
+      // live forecast uses, so training and inference features match.
+      const features = ml.features.extractForkFeatures(state.data, 60);
 
       // Add features + full raw motion data to training set.
       // `.time` is an absolute performance.now() value, so the recording's
@@ -643,6 +659,7 @@ async function loadMLModules() {
 
       state.trainSet.add(features, label, {
         recordingId: ml.trainingSet.generateRecordingId(),
+        featureVersion: ml.features.FEATURE_VERSION,
         timestamp: Date.now(),
         sampleCount: state.data.length,
         duration: parseFloat(durationSec),
@@ -1239,11 +1256,19 @@ async function loadMLModules() {
         const text = await file.text();
         const json = JSON.parse(text);
 
+        const ml = await loadMLModules();
         await ensureTrainSet();
-        const imported = new (await loadMLModules()).trainingSet.TrainingSet();
+        const imported = new ml.trainingSet.TrainingSet();
         imported.fromJSON(json);
 
         const merged = state.trainSet.mergeFrom(imported);
+        // Restored examples may have been exported by an older feature
+        // extractor; bring them onto the current definition immediately (not
+        // just on next load) so the merged set is internally consistent.
+        await state.trainSet.reprocessFeatures(
+          ml.features.extractForkFeatures,
+          ml.features.FEATURE_VERSION
+        );
         await state.trainSet.save();
 
         await updateTrainingStatus();
