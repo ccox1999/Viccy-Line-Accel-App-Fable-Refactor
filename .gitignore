@@ -1,0 +1,6 @@
+# Personal sensor-data exports (real trip recordings, multi-MB) — never publish
+Test data.json
+victoria-training-*.json
+
+# Local tool state
+.claude/

@@ -241,7 +241,10 @@ export class TrainingSet {
   /**
    * Import training set from JSON.
    * Handles v2 (features only) and v3 (features + rawMotionData) formats.
-   * Examples without a features object (v1 format) are skipped with a warning.
+   * Examples without a features object (v1 format) or without a valid
+   * left/right label are skipped with a warning — one bad example in a
+   * hand-edited backup must not be able to crash every later classifier
+   * build (addTrainingExample throws on labels it doesn't recognise).
    */
   fromJSON(json) {
     if (!json.examples || !Array.isArray(json.examples)) {
@@ -251,12 +254,15 @@ export class TrainingSet {
     const usable = [];
     let skipped = 0;
     for (const ex of json.examples) {
-      if (ex.features && typeof ex.features === "object" && !Array.isArray(ex.features)) {
+      const label = typeof ex.label === "string" ? ex.label.toLowerCase() : "";
+      const hasFeatures =
+        ex.features && typeof ex.features === "object" && !Array.isArray(ex.features);
+      if (hasFeatures && (label === "left" || label === "right")) {
         usable.push({
           id: ex.id,
           features: ex.features,
           featureVersion: ex.featureVersion, // undefined for pre-versioned data
-          label: ex.label,
+          label,
           timestamp: ex.timestamp,
           recordingId: ex.recordingId,
           sampleCount: ex.sampleCount,
@@ -269,7 +275,7 @@ export class TrainingSet {
       }
     }
     if (skipped > 0) {
-      console.warn(`[TrainingSet] Skipped ${skipped} example(s) with no feature vector (old format)`);
+      console.warn(`[TrainingSet] Skipped ${skipped} example(s) with no feature vector or invalid label`);
     }
 
     this.examples = usable;
@@ -397,25 +403,34 @@ export class TrainingSet {
   /**
    * Merge another training set into this one (for restoring from exports).
    * Deduplicates by recordingId to avoid double-imports.
+   *
+   * Incoming examples get FRESH local ids: every device numbers its own
+   * examples from example-1, so keeping the imported id would collide with
+   * ids already in this set — and get()/remove() (e.g. the history delete
+   * button) would silently hit the wrong recording. recordingId, the stable
+   * cross-device key, is preserved (or assigned, for very old exports that
+   * lack one, so those aren't all deduped against each other as undefined).
    */
   mergeFrom(otherTrainingSet) {
-    const existingIds = new Set(this.examples.map(ex => ex.recordingId));
-    let merged = 0;
-
-    for (const ex of otherTrainingSet.examples) {
-      if (!existingIds.has(ex.recordingId)) {
-        this.examples.push({ ...ex });
-        existingIds.add(ex.recordingId);
-        merged++;
-      }
-    }
-
-    // Rebuild ID numbering
+    // Make sure new ids start beyond everything already in this set.
     const maxId = this.examples.reduce((max, ex) => {
       const match = /example-(\d+)/.exec(ex.id ?? "");
       return match ? Math.max(max, parseInt(match[1], 10)) : max;
     }, 0);
-    this.nextId = maxId + 1;
+    this.nextId = Math.max(this.nextId, maxId + 1);
+
+    const existingIds = new Set(
+      this.examples.map(ex => ex.recordingId).filter(id => id != null)
+    );
+    let merged = 0;
+
+    for (const ex of otherTrainingSet.examples) {
+      if (ex.recordingId != null && existingIds.has(ex.recordingId)) continue;
+      const id = `example-${this.nextId++}`;
+      this.examples.push({ ...ex, id, recordingId: ex.recordingId ?? id });
+      if (ex.recordingId != null) existingIds.add(ex.recordingId);
+      merged++;
+    }
 
     console.log(`[TrainingSet] Merged ${merged} new examples`);
     return merged;

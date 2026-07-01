@@ -671,8 +671,15 @@ class FeatureSubsetModel {
  * @returns {{ model, name, accuracy, featureCount, baselineAccuracy }}
  */
 export function selectBestModel(examples, minConfidence = 0.6) {
+  // Only train on well-formed examples: a stray label (hand-edited backup,
+  // future import format) would make addTrainingExample throw and take the
+  // whole live forecast down with it.
   const usable = (examples || []).filter(
-    (e) => e.features && typeof e.features === "object" && !Array.isArray(e.features)
+    (e) =>
+      e.features &&
+      typeof e.features === "object" &&
+      !Array.isArray(e.features) &&
+      (e.label === "left" || e.label === "right")
   );
   const data = usable.map((e) => ({
     features: e.features,

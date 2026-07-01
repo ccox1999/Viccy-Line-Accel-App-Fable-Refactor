@@ -508,7 +508,9 @@ async function loadMLModules() {
     // Wire up delete buttons
     ui.recordingsList.querySelectorAll(".recording-delete").forEach(btn => {
       btn.addEventListener("click", (e) => {
-        const id = e.target.dataset.id;
+        // currentTarget, not target: a click can land on a child node of the
+        // button, which has no data-id.
+        const id = e.currentTarget.dataset.id;
         if (window.confirm("Delete this recording?")) {
           state.trainSet.remove(id);
           state.trainSet.save().then(() => {
@@ -1153,6 +1155,13 @@ async function loadMLModules() {
     state.data = [];
     state.dataTrimmed = false;
     state.startTime = performance.now();
+    // Re-anchor the perf→epoch mapping per trip. Date.now() keeps ticking
+    // while iOS suspends the page but performance.now() does not, so an
+    // epochBase captured at page load drifts by the total suspended time —
+    // on a long-lived PWA that put exported sample times hours behind
+    // reality. Relative spacing was always right; this fixes the absolute
+    // wall-clock times in saved rawMotionData.
+    state.epochBase = Date.now() - performance.now();
     state.recording = true;
     state.motionTsOffset = null; // re-estimate the sensor-clock offset per trip
     state.lastPredictionAt = 0;
@@ -1234,10 +1243,20 @@ async function loadMLModules() {
 
     // Offer to label the recording for training. The modal has its own
     // Skip button (and tap-outside-to-skip), so no extra confirm needed.
-    if (hasData && state.trainSet) {
-      const label = await showLabelingDialog();
-      if (label && label !== "skip") {
-        await labelAndSaveToTrainingSet(label);
+    // Retry the training-set load here rather than trusting init(): if it
+    // failed at startup (e.g. a transient module-load error), silently
+    // never showing the label sheet would throw the trip away.
+    if (hasData) {
+      try {
+        await ensureTrainSet();
+      } catch (err) {
+        console.warn("[ML] Training set unavailable; cannot offer labeling:", err);
+      }
+      if (state.trainSet) {
+        const label = await showLabelingDialog();
+        if (label && label !== "skip") {
+          await labelAndSaveToTrainingSet(label);
+        }
       }
     }
   }

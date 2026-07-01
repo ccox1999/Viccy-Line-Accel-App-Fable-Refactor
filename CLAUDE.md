@@ -1,6 +1,21 @@
 # Victoria Line Motion Lab — Project Context
 
-## Current state (2026-06-21)
+## Current state (2026-07-01) — review pass: import hardening + fixes
+
+Review of the whole app; all fixes verified by a headless-Edge test harness (17 assertions) that replayed the exact Restore-button flow against a REAL v3 export from the live app (`Test data.json`, 1 example, pre-`featureVersion`), so **backward compatibility with the current export format is proven**, not assumed. Changes:
+
+- **`TrainingSet.mergeFrom` assigns FRESH local ids to merged examples** (was: kept imported ids). Every device numbers from `example-1`, so restoring a backup into a non-empty set virtually guaranteed id collisions — and `remove(id)` / the history delete button silently deleted the WRONG recording. `recordingId` (the cross-device dedup key) is preserved; exports that lack one get it backfilled from the new id instead of all deduping against each other as `undefined`.
+- **`TrainingSet.fromJSON` validates + normalises labels** (lowercases; skips non-left/right with a warning). One bad label in a hand-edited backup used to make every later `addTrainingExample` throw — killing the live forecast and making the post-label save alert report a false "Failed to save". `selectBestModel` also filters malformed examples as defense-in-depth.
+- **`stopRecording` retries `ensureTrainSet()`** before offering the label sheet, so a transient startup failure can no longer silently discard a labelled trip.
+- **`state.epochBase` re-anchored at every `startRecording`** — `Date.now()` ticks during iOS page suspension, `performance.now()` doesn't, so the load-time offset drifted by total suspended time and put exported `rawMotionData` epoch times hours behind reality on a long-lived PWA. Relative spacing was always correct.
+- **History delete reads `e.currentTarget`** (not `e.target`) so future markup inside the button can't break it.
+- **`.gitignore` added** — `Test data.json` (a real 3.9 MB personal sensor export sitting untracked in the folder) and `victoria-training-*.json` can no longer be accidentally committed to the public repo.
+- README drift fixed (forecast updates every ~1 s from the fork-anchored window, not "every 5 s from the last 10 s"; model selection documented; icons section updated — they exist).
+- Service worker cache → **v22**.
+
+Verification harness (not committed): a temp `__import-test.html` module page served by `python -m http.server`, run via `msedge --headless=new --dump-dom --virtual-time-budget` through `cmd` (PowerShell swallows Edge's stdout). Covers: restore into empty set; restore into colliding set (unique ids, preserved recordingId/label/9393-sample raw data); `reprocessFeatures` upgrade to FEATURE_VERSION 3 (45 finite features); re-import dedup; label normalisation; `selectBestModel`+`predictProbability` surviving junk labels; v3 export shape round-trip; ~4 MB localStorage save/load.
+
+## Previous state (2026-06-21)
 
 **What it does:** A PWA for recording iPhone motion data (acceleration + rotation + gravity) on the Victoria Line, classifying which platform the train is heading for (left or right fork at Brixton) using k-NN / logistic regression (auto-selected by CV) with z-score normalization and Fisher-weighted features. Orientation invariance comes from projecting each sample onto the per-sample gravity vector (no integration → no drift) — NOT from trajectory reconstruction (that was tried and removed; see below).
 
@@ -16,7 +31,7 @@
 - `classifier.js`: k-NN (k=5) with z-score normalization (stdDev floored at 0.01) + Fisher-style class-separation weighting (only engaged when ≥3 examples per class, else uniform). `predict()` takes an optional `minConfidence`; the live forecast uses 0.6 so a 3/2 split shows "Not sure" instead of a coin-flip.
 - Accuracy is estimated honestly via repeated (15×) held-out cross-validation after each label, shown in the save alert once there are ≥5 examples per class.
 - `training-set.js`: v3 format stores features + raw motion data + metadata (incl. `featureVersion`) per example; `reprocessFeatures(extractFn, version)` re-extracts stale examples from raw data.
-- Service worker cache (v21): offline support via app-shell pattern, now incl. icons. (Bump on every edit.)
+- Service worker cache (v22 as of 2026-07-01): offline support via app-shell pattern, now incl. icons. (Bump on every edit.)
 - PWA-ready: installable to home screen, better storage persistence than bookmarked URL.
 
 **ML caveats / open questions:**

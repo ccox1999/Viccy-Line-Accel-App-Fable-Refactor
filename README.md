@@ -38,17 +38,14 @@ HTTP. The easiest free option is GitHub Pages:
 Any other HTTPS static host (Netlify, Cloudflare Pages, Vercel…) works
 just as well.
 
-### Icons to add
+### Icons
 
-The manifest and HTML reference three PNG icons that you need to add to
-the repository root (any square logo works):
+Three PNG icons ship in the repository root (replace them with any square
+logo to rebrand):
 
 - `apple-touch-icon.png` — 180×180 (home-screen icon on iOS)
 - `icon-192.png` — 192×192
 - `icon-512.png` — 512×512
-
-Until they exist, the app still runs fine — installs just get a generic
-icon.
 
 ## Using the app
 
@@ -56,8 +53,7 @@ icon.
    (required once per site on iOS 13+).
 2. **Start Recording** — charts begin scrolling; the status row shows a
    pulsing red dot, live sample count, rate, and duration. With ≥5 labelled
-   trips of each platform, a **Live Platform Forecast** card updates every
-   ~5 s.
+   trips, a **Live Platform Forecast** card updates every second.
 3. **Stop Recording** — a labelling sheet appears: **← LEFT / RIGHT → / Skip**.
 4. Pick the platform you actually arrived at. The trip's features **and**
    full raw motion are saved to localStorage automatically, an internal
@@ -138,14 +134,17 @@ Stockwell → Brixton junction:
    appears when you stop. The trip's feature vector and raw motion are
    stored in localStorage.
 2. Once you have 5+ labelled examples of each platform, the classifier is
-   live: k-nearest neighbours over z-score-normalised,
-   class-separation-weighted features. These include the gravity-projected
-   **world-frame yaw rate** (the rotation-rate vector projected onto the
-   vertical axis the gravity sensor reveals), so the turn-direction signal
-   survives any phone orientation.
+   live: cross-validation on your own data picks between a k-NN (z-score
+   normalised, class-separation-weighted features) and an L2 logistic
+   regression, whichever predicts better. The features include the
+   gravity-projected **world-frame yaw rate** (the rotation-rate vector
+   projected onto the vertical axis the gravity sensor reveals), so the
+   turn-direction signal survives any phone orientation, and they are
+   extracted from a 10 s **fork window** anchored to the train's final stop
+   at the Brixton terminus rather than averaged over the whole trip.
 3. While recording, a **Live Platform Forecast** card re-predicts every
-   5 seconds from the last 10 seconds of motion. A borderline call shows
-   **"Not sure"** rather than committing to a coin-flip.
+   second from the most fork-like window of the trip so far. A borderline
+   call shows **"Not sure"** rather than committing to a coin-flip.
 
 The **🧪 Test Data** button seeds 10 fake examples so the flow can be
 tested without real trips. See `TESTING.md` and `ML-INTEGRATION-GUIDE.md`.
