@@ -23,14 +23,55 @@
  *   v3 — that window is now ROUTE-ANCHORED to the Brixton terminus stop (see
  *        extractForkFeatures), falling back to the v2 yaw-amplitude selector
  *        only when no clean terminal stop is present.
- * Stored examples keep their raw motion data, so TrainingSet.reprocessFeatures
- * can transparently re-extract them to the current definition instead of
- * silently mixing two incompatible feature scales in one training set.
+ *   v4 — adds APPROACH-SHAPE features (approach_*) over the last 30 s before
+ *        the terminal stop. Analysis of the first 11 real trips showed the
+ *        v3 aggregates cannot separate left from right (LOOCV at or below the
+ *        6/11 majority baseline): a crossover onto a parallel road is an
+ *        S-bend with ~zero NET heading change, so world_yaw_mean averages the
+ *        fork away by construction. What CAN distinguish the roads is the
+ *        TIME STRUCTURE — which way the S swings first, when, and how much
+ *        switch-clatter roughness each segment of the approach carries —
+ *        which is exactly what the approach_* features capture.
+ * Stored examples keep their raw motion data (IndexedDB via raw-store.js), so
+ * TrainingSet.reprocessFeatures can transparently re-extract them to the
+ * current definition instead of silently mixing two incompatible feature
+ * scales in one training set.
  */
-export const FEATURE_VERSION = 3;
+export const FEATURE_VERSION = 4;
 
 /** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
 export const FORK_WINDOW_SEC = 10;
+
+/** Seconds of pre-stop data the approach-shape features describe. */
+export const APPROACH_WINDOW_SEC = 30;
+
+/** Seconds of per-second history kept in a recording's approach profile. */
+export const PROFILE_SEC = 60;
+
+/**
+ * Feature keys that are orientation-invariant by construction: computed from
+ * gravity-projected quantities (world yaw, vertical/horizontal split) or from
+ * rotation/acceleration MAGNITUDES, none of which change when the phone is
+ * held differently. The classifier trains ONLY on these — device-frame
+ * features (per-axis means, skews, jerks…) encode how the phone was carried,
+ * and on a small personal dataset a model will happily learn carry habits as
+ * a proxy for the label. That failure mode is excluded structurally here,
+ * not left to feature weighting.
+ */
+export const ORIENTATION_INVARIANT_KEYS = [
+  // v3 aggregates (fork window)
+  "world_yaw_mean", "world_yaw_peak", "vert_accel_rms", "horiz_accel_rms",
+  "accel_mag_rms", "accel_mag_peak", "accel_mag_mean", "accel_rms_total",
+  "energy_total",
+  "fft_bin_0", "fft_bin_1", "fft_bin_2", "fft_bin_3",
+  "fft_bin_4", "fft_bin_5", "fft_bin_6", "fft_bin_7",
+  "spectral_entropy",
+  // v4 approach-shape features (last APPROACH_WINDOW_SEC before the stop)
+  "approach_yaw_early", "approach_yaw_mid", "approach_yaw_late",
+  "approach_yaw_net", "approach_yaw_trend", "approach_yaw_swing",
+  "approach_yaw_lead",
+  "approach_vert_rms_early", "approach_vert_rms_mid", "approach_vert_rms_late",
+];
 
 /**
  * Physical ceiling (deg/s) for a TRAIN's yaw rate, used only to score candidate
@@ -370,25 +411,80 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
 
   const n = motionData.length;
   const w = Math.round(windowSec * sampleRateHz);
-  if (w < 2 || n <= w) return extractFeatures(motionData, sampleRateHz);
+  if (w < 2 || n <= w) {
+    return { ...getNullApproachFeatures(), ...extractFeatures(motionData, sampleRateHz) };
+  }
 
-  // Per-sample, orientation-invariant prefix sums (all O(1) to window):
-  //  - prefYaw:     CLIPPED world-frame yaw rate, for the amplitude fallback.
-  //                 Projection mirrors extractFeatures exactly: rotation-rate
-  //                 vector (beta, gamma, alpha) dotted with the gravity unit
-  //                 vector; clip caps hand jerks (see FORK_YAW_SELECT_CLIP).
-  //  - prefHorizSq: squared horizontal acceleration (the component ⟂ gravity),
-  //                 for terminal-stop detection — braking/cornering live here,
-  //                 track roughness is vertical and excluded.
-  //  - prefValid:   gravity-usable sample count, so old data degrades to zeros.
+  const pre = motionPrefixes(motionData);
+
+  // Not enough gravity samples anywhere (old data) → whole-recording fallback.
+  if (pre.prefValid[n] < w * 0.5) {
+    return { ...getNullApproachFeatures(), ...extractFeatures(motionData, sampleRateHz) };
+  }
+
+  // PRIMARY: route-anchored window ending at the Brixton terminus stop. When
+  // there is no terminal stop yet (live forecast mid-trip, cut-short
+  // recording), the approach features describe the trailing end of the data
+  // so far — which converges on the anchored definition as the train
+  // actually arrives.
+  const anchor = anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, sampleRateHz);
+  const cease = anchor ? anchor.cease : n;
+  const approach = approachFeatures(pre, cease, sampleRateHz);
+
+  if (anchor) {
+    return {
+      ...approach,
+      ...extractFeatures(motionData.slice(anchor.start, anchor.start + w), sampleRateHz),
+    };
+  }
+
+  // FALLBACK: largest |mean clipped world-yaw| window (the v2 selector).
+  const stride = Math.max(1, Math.round(sampleRateHz / 4)); // ~0.25 s steps
+  const minValid = w * 0.5; // window must be at least half gravity-valid
+  let bestStart = -1;
+  let bestScore = -1;
+  for (let start = 0; start + w <= n; start += stride) {
+    const sv = pre.prefValid[start + w] - pre.prefValid[start];
+    if (sv < minValid) continue;
+    const score = Math.abs((pre.prefYaw[start + w] - pre.prefYaw[start]) / sv);
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = start;
+    }
+  }
+
+  if (bestStart < 0) {
+    return { ...approach, ...extractFeatures(motionData, sampleRateHz) };
+  }
+  return {
+    ...approach,
+    ...extractFeatures(motionData.slice(bestStart, bestStart + w), sampleRateHz),
+  };
+}
+
+/**
+ * Per-sample, orientation-invariant prefix sums (any window then costs O(1)):
+ *  - prefYaw:     CLIPPED world-frame yaw rate. Projection mirrors
+ *                 extractFeatures exactly: rotation-rate vector
+ *                 (beta, gamma, alpha) dotted with the gravity unit vector;
+ *                 clip caps hand jerks (see FORK_YAW_SELECT_CLIP).
+ *  - prefHorizSq: squared horizontal acceleration (component ⟂ gravity), for
+ *                 terminal-stop detection — braking/cornering live here.
+ *  - prefVertSq:  squared vertical acceleration (component ∥ gravity) —
+ *                 track roughness / switch clatter lives here.
+ *  - prefValid:   gravity-usable sample count, so old data degrades to zeros.
+ */
+function motionPrefixes(motionData) {
+  const n = motionData.length;
   const prefYaw = new Float64Array(n + 1);
   const prefHorizSq = new Float64Array(n + 1);
+  const prefVertSq = new Float64Array(n + 1);
   const prefValid = new Int32Array(n + 1);
   for (let i = 0; i < n; i++) {
     const s = motionData[i];
     const gx = s.gx ?? 0, gy = s.gy ?? 0, gz = s.gz ?? 0;
     const gMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
-    let yaw = 0, horizSq = 0, valid = 0;
+    let yaw = 0, horizSq = 0, vertSq = 0, valid = 0;
     if (gMag >= 4 && gMag <= 20) {
       const ux = gx / gMag, uy = gy / gMag, uz = gz / gMag;
       const rawYaw =
@@ -400,47 +496,204 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
       const vert = ax * ux + ay * uy + az * uz;
       const hx = ax - vert * ux, hy = ay - vert * uy, hz = az - vert * uz;
       horizSq = hx * hx + hy * hy + hz * hz;
+      vertSq = vert * vert;
       valid = 1;
     }
     prefYaw[i + 1] = prefYaw[i] + yaw;
     prefHorizSq[i + 1] = prefHorizSq[i] + horizSq;
+    prefVertSq[i + 1] = prefVertSq[i] + vertSq;
     prefValid[i + 1] = prefValid[i] + valid;
   }
+  return { n, prefYaw, prefHorizSq, prefVertSq, prefValid };
+}
 
-  // Not enough gravity samples anywhere (old data) → whole-recording fallback.
-  if (prefValid[n] < w * 0.5) return extractFeatures(motionData, sampleRateHz);
+/**
+ * Mean clipped world-yaw over [a, b), or null when too few gravity-valid
+ * samples to judge (returned as null so callers can SKIP the span rather
+ * than treat it as zero yaw).
+ */
+function spanYaw(pre, a, b) {
+  const v = pre.prefValid[b] - pre.prefValid[a];
+  if (b <= a || v < (b - a) * 0.5) return null;
+  return (pre.prefYaw[b] - pre.prefYaw[a]) / v;
+}
 
-  // PRIMARY: route-anchored window ending at the Brixton terminus stop.
-  const anchored = anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz);
-  if (anchored >= 0) {
-    return extractFeatures(motionData.slice(anchored, anchored + w), sampleRateHz);
+/** Vertical-accel RMS over [a, b), or 0 when unjudgeable. */
+function spanVertRms(pre, a, b) {
+  const v = pre.prefValid[b] - pre.prefValid[a];
+  if (b <= a || v < (b - a) * 0.5) return 0;
+  return Math.sqrt((pre.prefVertSq[b] - pre.prefVertSq[a]) / v);
+}
+
+/**
+ * APPROACH-SHAPE features: the left/right discriminators that survive the
+ * physics of a parallel-road junction.
+ *
+ * A crossover to a parallel platform road is an S-BEND: the train yaws one
+ * way onto the diverging road, then yaws back to run parallel. Net heading
+ * change ≈ 0, which is why the v3 windowed yaw MEAN carries no signal (the
+ * first 11 real trips confirmed this empirically). The information is in the
+ * shape and timing of the yaw transient, and in WHERE the switch-clatter
+ * roughness happens — so these features slice the last APPROACH_WINDOW_SEC
+ * before the stop into thirds and describe the sequence:
+ *
+ *  - approach_yaw_early/mid/late: mean clipped world-yaw per 10 s third
+ *    (°/s, signed) — a coarse sampled version of the yaw-vs-time curve.
+ *  - approach_yaw_net: mean over the whole approach (net heading tendency).
+ *  - approach_yaw_trend: OLS slope of the per-second yaw over the last 20 s
+ *    (°/s per s, signed). An S ridden left-first has rising yaw; ridden
+ *    right-first, falling. This is THE swing-order feature.
+ *  - approach_yaw_swing: max − min of per-second yaw over the last 20 s —
+ *    how much S-bend there is at all (a straight platform road ≈ 0, which
+ *    itself separates the roads when only one involves a crossover).
+ *  - approach_yaw_lead: the per-second yaw value at whichever extreme
+ *    (max or min) happens EARLIER — "which way did it swerve first", signed.
+ *  - approach_vert_rms_early/mid/late: gravity-projected vertical
+ *    acceleration RMS per third — switch clatter is a roughness burst, and
+ *    its position in the approach differs between roads.
+ *
+ * All quantities are gravity-projected or magnitudes → orientation-invariant.
+ * Per-second means (not raw samples) keep hand jerks from dominating; the
+ * ±FORK_YAW_SELECT_CLIP clip caps what any single flick can contribute.
+ *
+ * @param {Object} pre - motionPrefixes() result
+ * @param {number} cease - sample index where the train comes to rest
+ *                         (end of data when no terminal stop was found)
+ * @param {number} sampleRateHz
+ * @returns {Object} the approach_* feature block
+ */
+function approachFeatures(pre, cease, sampleRateHz) {
+  const f = getNullApproachFeatures();
+  const hz = Math.max(1, Math.round(sampleRateHz));
+  const end = Math.max(0, Math.min(cease, pre.n));
+
+  // Thirds of the approach window, clamped to the data that exists.
+  const third = 10 * hz;
+  const late = spanYaw(pre, Math.max(0, end - third), end);
+  const mid = spanYaw(pre, Math.max(0, end - 2 * third), Math.max(0, end - third));
+  const early = spanYaw(pre, Math.max(0, end - 3 * third), Math.max(0, end - 2 * third));
+  const net = spanYaw(pre, Math.max(0, end - 3 * third), end);
+  if (late !== null) f.approach_yaw_late = late;
+  if (mid !== null) f.approach_yaw_mid = mid;
+  if (early !== null) f.approach_yaw_early = early;
+  if (net !== null) f.approach_yaw_net = net;
+
+  f.approach_vert_rms_late = spanVertRms(pre, Math.max(0, end - third), end);
+  f.approach_vert_rms_mid = spanVertRms(pre, Math.max(0, end - 2 * third), Math.max(0, end - third));
+  f.approach_vert_rms_early = spanVertRms(pre, Math.max(0, end - 3 * third), Math.max(0, end - 2 * third));
+
+  // Per-second yaw series over the last 20 s (the fork itself is well inside
+  // this) for the shape features.
+  const shapeSec = 20;
+  const series = []; // [secondsBeforeRest (negative→0), yaw]
+  for (let s = shapeSec; s >= 1; s--) {
+    const a = end - s * hz;
+    const b = end - (s - 1) * hz;
+    if (a < 0) continue;
+    const y = spanYaw(pre, a, b);
+    if (y !== null) series.push([-(s - 0.5), y]);
   }
-
-  // FALLBACK: largest |mean clipped world-yaw| window (the v2 selector).
-  const stride = Math.max(1, Math.round(sampleRateHz / 4)); // ~0.25 s steps
-  const minValid = w * 0.5; // window must be at least half gravity-valid
-  let bestStart = -1;
-  let bestScore = -1;
-  for (let start = 0; start + w <= n; start += stride) {
-    const sv = prefValid[start + w] - prefValid[start];
-    if (sv < minValid) continue;
-    const score = Math.abs((prefYaw[start + w] - prefYaw[start]) / sv);
-    if (score > bestScore) {
-      bestScore = score;
-      bestStart = start;
+  if (series.length >= 5) {
+    // OLS slope of yaw vs time.
+    const mt = mean(series.map((p) => p[0]));
+    const my = mean(series.map((p) => p[1]));
+    let num = 0, den = 0;
+    for (const [t, y] of series) {
+      num += (t - mt) * (y - my);
+      den += (t - mt) * (t - mt);
     }
+    f.approach_yaw_trend = den > 0 ? num / den : 0;
+
+    let maxI = 0, minI = 0;
+    for (let i = 1; i < series.length; i++) {
+      if (series[i][1] > series[maxI][1]) maxI = i;
+      if (series[i][1] < series[minI][1]) minI = i;
+    }
+    f.approach_yaw_swing = series[maxI][1] - series[minI][1];
+    f.approach_yaw_lead = series[Math.min(maxI, minI)][1];
   }
 
-  if (bestStart < 0) return extractFeatures(motionData, sampleRateHz);
-  return extractFeatures(motionData.slice(bestStart, bestStart + w), sampleRateHz);
+  for (const key in f) {
+    if (!Number.isFinite(f[key])) f[key] = 0;
+  }
+  return f;
+}
+
+/** Zeroed approach-feature block (short/old/gravity-less recordings). */
+function getNullApproachFeatures() {
+  return {
+    approach_yaw_early: 0,
+    approach_yaw_mid: 0,
+    approach_yaw_late: 0,
+    approach_yaw_net: 0,
+    approach_yaw_trend: 0,
+    approach_yaw_swing: 0,
+    approach_yaw_lead: 0,
+    approach_vert_rms_early: 0,
+    approach_vert_rms_mid: 0,
+    approach_vert_rms_late: 0,
+  };
+}
+
+/**
+ * Compact per-second summary of the arrival: clipped world-yaw, vertical
+ * (roughness) and horizontal (speed proxy) acceleration RMS for each of the
+ * last PROFILE_SEC seconds before the train came to rest, plus where the
+ * rest point was. ~a few hundred bytes per trip, stored alongside the
+ * features in localStorage.
+ *
+ * WHY: the first 10 real trips lost their raw sensor data to a localStorage
+ * quota fallback, leaving nothing to re-analyse when the v3 features turned
+ * out to carry no left/right signal. This profile is the belt to IndexedDB's
+ * braces: even if raw data is ever lost again, every future trip keeps a
+ * time-resolved picture of its approach that new window/shape ideas can be
+ * tested against offline.
+ *
+ * @param {Array} motionData - full recording
+ * @param {number} sampleRateHz
+ * @returns {Object|null} { version, anchored, restSec, yaw[], vertRms[], horizRms[] }
+ */
+export function computeApproachProfile(motionData, sampleRateHz = 60) {
+  if (!motionData || motionData.length < 2) return null;
+  const hz = Math.max(1, Math.round(sampleRateHz));
+  const n = motionData.length;
+  const w = Math.round(FORK_WINDOW_SEC * hz);
+  const pre = motionPrefixes(motionData);
+  if (pre.prefValid[n] < Math.min(n, w) * 0.5) return null; // gravity-less (old) data
+
+  const anchor = n > w ? anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, hz) : null;
+  const cease = anchor ? anchor.cease : n;
+
+  const seconds = Math.min(PROFILE_SEC, Math.floor(cease / hz));
+  const yaw = [], vertRms = [], horizRms = [];
+  const round3 = (x) => Math.round(x * 1000) / 1000;
+  for (let s = seconds; s >= 1; s--) {
+    const a = cease - s * hz;
+    const b = cease - (s - 1) * hz;
+    const y = spanYaw(pre, a, b);
+    const v = pre.prefValid[b] - pre.prefValid[a];
+    yaw.push(y === null ? null : round3(y));
+    vertRms.push(v > 0 ? round3(Math.sqrt((pre.prefVertSq[b] - pre.prefVertSq[a]) / v)) : null);
+    horizRms.push(v > 0 ? round3(Math.sqrt((pre.prefHorizSq[b] - pre.prefHorizSq[a]) / v)) : null);
+  }
+
+  return {
+    version: 1,
+    anchored: !!anchor,          // false → restSec is just the end of the data
+    restSec: round3(cease / hz), // rest point, seconds from recording start
+    yaw,                         // °/s, clipped ±FORK_YAW_SELECT_CLIP, oldest first
+    vertRms,                     // m/s², roughness
+    horizRms,                    // m/s², braking/cornering (speed proxy)
+  };
 }
 
 /**
  * Locate the fork window by anchoring to the train's final stop at Brixton.
  *
- * Returns the START index of a `w`-sample window ending where the train comes
- * to rest, or -1 if no clean terminal stop is found (the caller then falls back
- * to the yaw-amplitude selector).
+ * Returns `{start, cease}` — the start index of a `w`-sample window ending
+ * where the train comes to rest, and that rest index itself — or null if no
+ * clean terminal stop is found (the caller then falls back to the
+ * yaw-amplitude selector).
  *
  * A "stop" is a stretch of at least MIN_TERMINAL_STOP_SEC whose mean horizontal
  * acceleration sits below STATIONARY_ACCEL_RMS. We scan from the END so we lock
@@ -455,11 +708,11 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
  * @param {number} n - sample count
  * @param {number} w - window length in samples
  * @param {number} sampleRateHz - sampling rate
- * @returns {number} window start index, or -1
+ * @returns {{start: number, cease: number}|null}
  */
 function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
   const minStop = Math.max(2, Math.round(MIN_TERMINAL_STOP_SEC * sampleRateHz));
-  if (n < minStop) return -1;
+  if (n < minStop) return null;
 
   // RMS of horizontal accel over [a, b); Infinity if too little gravity to judge.
   const blockRms = (a, b) => {
@@ -479,11 +732,11 @@ function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
     while (cease - 1 >= 0 && isStop(cease - 1)) cease--;
     const winStart = cease - w;
     if (winStart >= 0 && blockRms(winStart, cease) >= STATIONARY_ACCEL_RMS) {
-      return winStart;
+      return { start: winStart, cease };
     }
     c = cease - 1; // this stop is preceded by quiet (or runs off the start) — look earlier
   }
-  return -1;
+  return null;
 }
 
 /**
@@ -739,6 +992,8 @@ function computeSpectralEntropy(magnitudes) {
 
 /**
  * Return a feature vector filled with zeros (for empty/invalid data).
+ * Includes the approach_* block so every extractForkFeatures return path
+ * has the same key set.
  */
 function getNullFeatures() {
   const keys = [
@@ -757,7 +1012,7 @@ function getNullFeatures() {
     "fft_bin_4", "fft_bin_5", "fft_bin_6", "fft_bin_7",
     "spectral_entropy",
   ];
-  return Object.fromEntries(keys.map(k => [k, 0]));
+  return { ...getNullApproachFeatures(), ...Object.fromEntries(keys.map(k => [k, 0])) };
 }
 
 /**

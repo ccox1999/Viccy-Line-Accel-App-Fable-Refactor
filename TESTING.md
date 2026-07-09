@@ -35,10 +35,12 @@ After tapping you should see the training status line update to
    appears. With ≥5 of each class it updates every ~5 s; a borderline call
    shows **“Not sure”** rather than a coin-flip.
 3. **Stop Recording** — a labeling sheet appears: **← LEFT / RIGHT → / Skip**.
-4. Pick the platform you actually arrived at. The trip’s features **and**
-   full raw motion data are saved to localStorage, an internal auto-backup
-   is written, and an alert shows the new totals plus an **estimated
-   accuracy** (once you have ≥5 of each side).
+4. Pick the platform you actually arrived at. The trip’s features and
+   approach profile are saved to localStorage, its **full raw motion data
+   to IndexedDB** (localStorage’s ~5 MB quota can’t hold raw recordings —
+   that’s what silently destroyed the raw data of the first 10 real trips),
+   an internal auto-backup is written, and an alert shows the new totals
+   plus an **estimated accuracy** (once you have ≥5 of each side).
 
 That’s the whole loop. Nothing else needs saving.
 

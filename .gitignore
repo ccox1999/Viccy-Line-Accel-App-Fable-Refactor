@@ -4,3 +4,6 @@ victoria-training-*.json
 
 # Local tool state
 .claude/
+
+# Local test harness pages (headless-browser verification, not part of the app)
+__*.html

@@ -11,7 +11,7 @@
 
 "use strict";
 
-const CACHE_VERSION = "motion-lab-v22";
+const CACHE_VERSION = "motion-lab-v23";
 
 // Everything the app needs to boot with no network at all.
 const APP_SHELL = [
@@ -22,6 +22,7 @@ const APP_SHELL = [
   "./features.js",
   "./classifier.js",
   "./training-set.js",
+  "./raw-store.js",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",

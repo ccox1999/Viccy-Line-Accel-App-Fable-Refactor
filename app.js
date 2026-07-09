@@ -32,12 +32,13 @@
 let mlModules = null;
 async function loadMLModules() {
   if (mlModules) return mlModules;
-  const [features, classifier, trainingSet] = await Promise.all([
+  const [features, classifier, trainingSet, rawStore] = await Promise.all([
     import("./features.js"),
     import("./classifier.js"),
     import("./training-set.js"),
+    import("./raw-store.js"),
   ]);
-  mlModules = { features, classifier, trainingSet };
+  mlModules = { features, classifier, trainingSet, rawStore };
   return mlModules;
 }
 
@@ -259,14 +260,20 @@ async function loadMLModules() {
   async function ensureTrainSet() {
     if (!state.trainSet) {
       const ml = await loadMLModules();
+      // Best-effort: ask the browser not to evict IndexedDB (raw recordings)
+      // under storage pressure. No-op where unsupported.
+      ml.rawStore.requestPersistence();
       state.trainSet = new ml.trainingSet.TrainingSet();
       await state.trainSet.load();
       // Bring any examples saved by an older feature extractor up to the
-      // current definition (fork-localised windows), re-extracting from their
-      // stored raw motion data so the whole set is on one consistent scale.
+      // current definition (fork-localised windows + approach shape),
+      // re-extracting from their stored raw motion data so the whole set is
+      // on one consistent scale — and backfill missing approach profiles.
       const changed = await state.trainSet.reprocessFeatures(
         ml.features.extractForkFeatures,
-        ml.features.FEATURE_VERSION
+        ml.features.FEATURE_VERSION,
+        60,
+        ml.features.computeApproachProfile
       );
       if (changed > 0) {
         console.log(`[ML] Reprocessed ${changed} example(s) to feature v${ml.features.FEATURE_VERSION}`);
@@ -684,7 +691,11 @@ async function loadMLModules() {
         timestamp: Date.now(),
         sampleCount: state.data.length,
         duration: parseFloat(durationSec),
-        rawMotionData, // full raw motion data for this recording
+        rawMotionData, // full raw motion data (moved to IndexedDB on save)
+        // Per-second yaw/roughness picture of the arrival — tiny, lives in
+        // localStorage, and keeps the trip analysable even if raw data is
+        // ever lost (the fate of the first 10 real recordings).
+        approachProfile: ml.features.computeApproachProfile(rawMotionData, 60),
         notes: `User-labeled ${label} platform`,
       });
 
@@ -1275,7 +1286,9 @@ async function loadMLModules() {
   ui.backupBtn.addEventListener("click", async () => {
     try {
       await ensureTrainSet();
-      state.trainSet.triggerDownload();
+      // Async: raw recordings are re-inlined from IndexedDB so the backup
+      // file is self-contained.
+      await state.trainSet.triggerDownload();
       alert("✓ Backup downloaded. You can save it to OneDrive or email to yourself.");
     } catch (err) {
       alert(`Backup failed: ${err.message}`);
@@ -1302,10 +1315,13 @@ async function loadMLModules() {
         const merged = state.trainSet.mergeFrom(imported);
         // Restored examples may have been exported by an older feature
         // extractor; bring them onto the current definition immediately (not
-        // just on next load) so the merged set is internally consistent.
+        // just on next load) so the merged set is internally consistent —
+        // and backfill approach profiles for any example carrying raw data.
         await state.trainSet.reprocessFeatures(
           ml.features.extractForkFeatures,
-          ml.features.FEATURE_VERSION
+          ml.features.FEATURE_VERSION,
+          60,
+          ml.features.computeApproachProfile
         );
         await state.trainSet.save();
 

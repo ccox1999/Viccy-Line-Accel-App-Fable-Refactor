@@ -13,6 +13,8 @@
 
 "use strict";
 
+import { ORIENTATION_INVARIANT_KEYS } from "./features.js";
+
 /**
  * k-Nearest Neighbors classifier for binary classification.
  *
@@ -681,12 +683,25 @@ export function selectBestModel(examples, minConfidence = 0.6) {
       !Array.isArray(e.features) &&
       (e.label === "left" || e.label === "right")
   );
-  const data = usable.map((e) => ({
-    features: e.features,
-    label: e.label,
-    recordingId: e.recordingId,
-    timestamp: e.timestamp,
-  }));
+
+  // HARD CONSTRAINT: train only on orientation-invariant features. The
+  // device-frame features (per-axis means/skews/jerks…) encode how the phone
+  // was carried, and on a tiny personal dataset any model will happily learn
+  // "phone in left pocket" as a proxy for "left platform". Fisher weighting
+  // was supposed to suppress them but is itself noise at this sample size —
+  // so they are excluded structurally, before any model sees the data.
+  // (Fallback to all features only if pruning would leave nothing, e.g. an
+  // unrecognisable hand-edited import.)
+  const invariantSet = new Set(ORIENTATION_INVARIANT_KEYS);
+  const data = usable.map((e) => {
+    const pruned = _pruneTo(e.features, invariantSet);
+    return {
+      features: Object.keys(pruned).length >= 3 ? pruned : e.features,
+      label: e.label,
+      recordingId: e.recordingId,
+      timestamp: e.timestamp,
+    };
+  });
 
   // K = Infinity → keep all features.
   const buildKNN = (rows, K, mc = 0) => {

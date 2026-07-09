@@ -11,7 +11,9 @@ tube, but the recorder works anywhere your phone does.
 - iOS 13+ motion-permission flow with a clear visual status pill
 - Live sample count, sample rate (Hz), and recording duration
 - Zero-friction training loop: **record → stop → label → done**, with each
-  labelled trip auto-saved to localStorage (features + full raw motion)
+  labelled trip auto-saved (features + approach profile to localStorage,
+  full raw motion to IndexedDB — raw recordings are ~3 MB each and would
+  blow localStorage's ~5 MB quota)
 - On-device k-NN platform prediction with a live forecast while recording and
   an honest cross-validated accuracy estimate after each label
 - Manual JSON backup / restore (save to OneDrive, email, or move to another
@@ -136,12 +138,16 @@ Stockwell → Brixton junction:
 2. Once you have 5+ labelled examples of each platform, the classifier is
    live: cross-validation on your own data picks between a k-NN (z-score
    normalised, class-separation-weighted features) and an L2 logistic
-   regression, whichever predicts better. The features include the
-   gravity-projected **world-frame yaw rate** (the rotation-rate vector
-   projected onto the vertical axis the gravity sensor reveals), so the
-   turn-direction signal survives any phone orientation, and they are
-   extracted from a 10 s **fork window** anchored to the train's final stop
-   at the Brixton terminus rather than averaged over the whole trip.
+   regression, whichever predicts better. The classifier trains **only on
+   orientation-invariant features** — gravity-projected quantities (like
+   the world-frame yaw rate) and motion magnitudes — so it physically
+   cannot learn how you were holding the phone as a proxy for the label.
+   Aggregates come from a 10 s **fork window** anchored to the train's
+   final stop at the Brixton terminus; **approach-shape features** describe
+   the last 30 s before that stop (which way the yaw S-bend of the
+   crossover swings first, and where the switch-clatter roughness sits),
+   because a crossover onto a parallel road has ~zero net heading change —
+   only its time structure distinguishes the two roads.
 3. While recording, a **Live Platform Forecast** card re-predicts every
    second from the most fork-like window of the trip so far. A borderline
    call shows **"Not sure"** rather than committing to a coin-flip.
@@ -155,9 +161,10 @@ tested without real trips. See `TESTING.md` and `ML-INTEGRATION-GUIDE.md`.
 index.html       App shell and markup
 style.css        Mobile-first styles (safe areas, touch targets, states)
 app.js           Sensor capture, chart rendering, export, ML wiring
-features.js      Feature extraction (time/frequency/statistical, ES module)
-classifier.js    k-NN classifier with z-score normalisation (ES module)
-training-set.js  Labeled training data manager, localStorage (ES module)
+features.js      Feature extraction (fork window + approach shape, ES module)
+classifier.js    k-NN / logistic classifiers, orientation-invariant features only
+training-set.js  Labeled training data manager — localStorage + IndexedDB
+raw-store.js     IndexedDB store for full raw recordings (quota-proof)
 manifest.json    PWA install metadata
 sw.js            Service worker — offline app-shell cache (optional)
 README.md        This file

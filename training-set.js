@@ -2,19 +2,23 @@
    Victoria Line Motion Lab — training set manager
 
    Manages the labeled training dataset:
-   - localStorage persistence (feature vectors are tiny — ~35 floats
-     per example — so even hundreds of trips fit comfortably)
+   - localStorage persistence for the SMALL data: feature vectors,
+     labels, metadata, and the compact per-second approach profile
+     (~hundreds of trips fit comfortably)
+   - IndexedDB (raw-store.js) for each trip's full raw motion data,
+     keyed by recordingId — ~3 MB of JSON per trip, which is why it
+     must NOT live in localStorage: iOS Safari's ~5 MB quota meant
+     the old inline design silently stripped raw data from every
+     stored example the moment a second real trip was saved
    - Add/remove examples
-   - Export/import JSON
+   - Export/import JSON (exports re-inline raw data from IndexedDB
+     so a backup file is fully self-contained and restorable)
    - Metadata tracking (recording ID, timestamp, notes)
-
-   Each example stores the EXTRACTED FEATURES of a trip, not the raw
-   motion samples. Features are all the k-NN classifier needs, and raw
-   recordings can always be saved separately via the app's normal
-   "Save Recording" export.
    ============================================================ */
 
 "use strict";
+
+import { putRaw, getRaw, deleteRaw, clearRaw } from "./raw-store.js";
 
 /**
  * Training set manager.
@@ -34,6 +38,10 @@ export class TrainingSet {
 
   /**
    * Load training set from localStorage.
+   *
+   * Older versions stored rawMotionData inline here; if any is found it is
+   * migrated to IndexedDB immediately (via save()) so it stops competing
+   * with the training set for localStorage quota.
    */
   async load() {
     try {
@@ -41,6 +49,10 @@ export class TrainingSet {
       if (stored) {
         this.fromJSON(JSON.parse(stored));
         console.log(`[TrainingSet] Loaded ${this.examples.length} examples from localStorage`);
+        if (this.examples.some((ex) => Array.isArray(ex.rawMotionData))) {
+          console.log("[TrainingSet] Migrating inline raw motion data to IndexedDB");
+          await this.save();
+        }
         return;
       }
     } catch (err) {
@@ -68,14 +80,20 @@ export class TrainingSet {
    * @param {number} sampleRateHz
    * @returns {Promise<number>} how many examples were re-extracted
    */
-  async reprocessFeatures(extractFn, version, sampleRateHz = 60) {
+  async reprocessFeatures(extractFn, version, sampleRateHz = 60, profileFn = null) {
     let changed = 0;
     for (const ex of this.examples) {
-      if (ex.featureVersion === version) continue;
-      if (!Array.isArray(ex.rawMotionData) || ex.rawMotionData.length < 2) continue;
+      const needsFeatures = ex.featureVersion !== version;
+      // undefined = never attempted; null = attempted, raw data can't yield
+      // a profile (e.g. no gravity channel) — don't retry on every load.
+      const needsProfile = profileFn && ex.approachProfile === undefined;
+      if (!needsFeatures && !needsProfile) continue;
+      const raw = await this.getRawMotionData(ex.id);
+      if (!Array.isArray(raw) || raw.length < 2) continue;
       try {
-        ex.features = extractFn(ex.rawMotionData, sampleRateHz);
+        ex.features = extractFn(raw, sampleRateHz);
         ex.featureVersion = version;
+        if (profileFn) ex.approachProfile = profileFn(raw, sampleRateHz);
         changed++;
       } catch (err) {
         console.warn(`[TrainingSet] Reprocess failed for ${ex.id}:`, err);
@@ -92,9 +110,50 @@ export class TrainingSet {
   }
 
   /**
-   * Save training set to localStorage.
+   * Full raw motion samples for an example: the in-memory copy when one is
+   * still attached (just recorded / just imported), otherwise IndexedDB.
+   * Returns null when the raw data no longer exists anywhere.
+   */
+  async getRawMotionData(id) {
+    const ex = this.get(id);
+    if (!ex) return null;
+    if (Array.isArray(ex.rawMotionData) && ex.rawMotionData.length > 0) {
+      return ex.rawMotionData;
+    }
+    return getRaw(ex.recordingId);
+  }
+
+  /**
+   * Save training set: raw motion data to IndexedDB, everything else to
+   * localStorage.
+   *
+   * Raw recordings are ~3 MB of JSON each against a ~5 MB localStorage
+   * quota, so they are moved to IndexedDB FIRST and only dropped from
+   * memory once that write succeeds. The localStorage payload then carries
+   * just features + metadata (a few KB per example) and effectively cannot
+   * hit quota. If IndexedDB is unavailable (some private-browsing modes),
+   * the raw data stays inline in the localStorage payload as before, with
+   * the old quota fallback as the very last resort — but that fallback now
+   * only ever fires in the no-IndexedDB case instead of on every save.
    */
   async save() {
+    // 1. Raw data → IndexedDB (keyed by recordingId). Only forget the
+    //    in-memory copy once the write reports success.
+    for (const ex of this.examples) {
+      if (!Array.isArray(ex.rawMotionData) || ex.rawMotionData.length === 0) continue;
+      const stored = await putRaw(ex.recordingId, ex.rawMotionData);
+      if (stored) {
+        delete ex.rawMotionData;
+        ex.hasRawData = true;
+      } else {
+        console.warn(
+          `[TrainingSet] IndexedDB write failed for ${ex.id} — keeping raw data inline`
+        );
+      }
+    }
+
+    // 2. Features + metadata (+ any raw that could not reach IndexedDB) →
+    //    localStorage.
     try {
       const jsonStr = JSON.stringify(this.toJSON());
       localStorage.setItem(this.storageKey, jsonStr);
@@ -102,17 +161,16 @@ export class TrainingSet {
       console.log(`[TrainingSet] Saved ${this.examples.length} examples to localStorage (${sizeKB.toFixed(1)} KB)`);
       return;
     } catch (err) {
-      // Quota exceeded: raw motion data is the bulk of the payload. Drop it and
-      // retry so the recordings (features + labels) STILL persist across
-      // reloads — far better than losing everything. Raw data can always be
-      // re-captured or kept via the manual "Backup Data" export.
+      // Quota exceeded — only reachable when IndexedDB was unavailable AND
+      // the inline raw data overflowed localStorage. Persist the recordings
+      // (features + labels) without raw rather than losing everything.
       if (_isQuotaError(err)) {
         try {
           const lite = this.toJSON();
           for (const ex of lite.examples) delete ex.rawMotionData;
           localStorage.setItem(this.storageKey, JSON.stringify(lite));
           console.warn(
-            "[TrainingSet] localStorage quota hit — saved WITHOUT raw motion data so the recordings still persist. Export a backup to keep raw data."
+            "[TrainingSet] localStorage quota hit and IndexedDB unavailable — saved WITHOUT raw motion data. Export a backup to keep raw data."
           );
           return;
         } catch (err2) {
@@ -155,7 +213,12 @@ export class TrainingSet {
       recordingId: metadata.recordingId || id,
       sampleCount: metadata.sampleCount,
       duration: metadata.duration,
-      rawMotionData: metadata.rawMotionData, // full raw timestamped sensor data
+      rawMotionData: metadata.rawMotionData, // moved to IndexedDB on save()
+      // Compact per-second approach summary (yaw / roughness vs time-to-stop).
+      // Tiny, so it lives in localStorage and survives even if raw data is
+      // ever lost — the post-hoc analysis lifeline the first 10 real trips
+      // didn't have.
+      approachProfile: metadata.approachProfile,
       notes: metadata.notes ?? "",
     });
 
@@ -163,12 +226,14 @@ export class TrainingSet {
   }
 
   /**
-   * Remove an example by ID.
+   * Remove an example by ID (and its raw data from IndexedDB).
    */
   remove(id) {
     const idx = this.examples.findIndex(ex => ex.id === id);
     if (idx >= 0) {
-      this.examples.splice(idx, 1);
+      const [removed] = this.examples.splice(idx, 1);
+      // Fire-and-forget: a failed delete only leaves an orphaned blob.
+      deleteRaw(removed.recordingId).catch(() => {});
       return true;
     }
     return false;
@@ -215,12 +280,14 @@ export class TrainingSet {
   }
 
   /**
-   * Export training set as JSON (portable format).
-   * Now includes full raw motion data for each recording.
+   * Export training set as JSON (portable format). Synchronous, so any raw
+   * motion data already moved to IndexedDB is represented only by its
+   * hasRawData flag — use toJSONWithRaw() when the output must be
+   * self-contained (manual backups).
    */
   toJSON() {
     return {
-      version: 3, // v3: examples carry full rawMotionData + features
+      version: 3, // v3 format: examples may carry full rawMotionData + features
       storageKey: this.storageKey,
       exportTimestamp: Date.now(),
       examples: this.examples.map(ex => ({
@@ -232,10 +299,30 @@ export class TrainingSet {
         recordingId: ex.recordingId,
         sampleCount: ex.sampleCount,
         duration: ex.duration,
-        rawMotionData: ex.rawMotionData, // full recording data
+        rawMotionData: ex.rawMotionData, // present only if not yet in IndexedDB
+        hasRawData: !!(ex.hasRawData || ex.rawMotionData) || undefined,
+        approachProfile: ex.approachProfile,
         notes: ex.notes,
       })),
     };
+  }
+
+  /**
+   * toJSON() with every recording's raw motion data re-inlined from
+   * IndexedDB, so the result is a fully self-contained v3 backup that can be
+   * restored on any device (or analysed offline).
+   */
+  async toJSONWithRaw() {
+    const data = this.toJSON();
+    for (const ex of data.examples) {
+      if (Array.isArray(ex.rawMotionData) && ex.rawMotionData.length > 0) continue;
+      const raw = await getRaw(ex.recordingId);
+      if (raw) {
+        ex.rawMotionData = raw;
+        ex.hasRawData = true;
+      }
+    }
+    return data;
   }
 
   /**
@@ -268,6 +355,12 @@ export class TrainingSet {
           sampleCount: ex.sampleCount,
           duration: ex.duration,
           rawMotionData: ex.rawMotionData, // may be undefined for v2 imports
+          // Best-effort flag: correct for this device's own localStorage
+          // (raw is in IndexedDB), possibly stale for a backup imported from
+          // another device — where a stale true only costs one failed
+          // IndexedDB lookup in getRawMotionData().
+          hasRawData: Array.isArray(ex.rawMotionData) ? true : ex.hasRawData === true,
+          approachProfile: ex.approachProfile,
           notes: ex.notes ?? "",
         });
       } else {
@@ -289,7 +382,7 @@ export class TrainingSet {
   }
 
   /**
-   * Clear all training data (destructive).
+   * Clear all training data (destructive) — including raw recordings.
    */
   async clear() {
     this.examples = [];
@@ -300,6 +393,7 @@ export class TrainingSet {
     } catch (err) {
       console.warn("[TrainingSet] Failed to clear localStorage:", err);
     }
+    await clearRaw();
   }
 
   /**
@@ -327,11 +421,12 @@ export class TrainingSet {
   }
 
   /**
-   * Export training set as a downloadable JSON file blob.
+   * Export training set as a downloadable JSON file blob, with raw motion
+   * data re-inlined from IndexedDB so the backup is self-contained.
    * Returns {blob, filename} for use with download links.
    */
-  exportAsFile() {
-    const data = this.toJSON();
+  async exportAsFile() {
+    const data = await this.toJSONWithRaw();
     const counts = this.countByLabel();
     data.exportNote = `Victoria Line Motion Lab training data — ${counts.left}L / ${counts.right}R examples`;
 
@@ -347,8 +442,8 @@ export class TrainingSet {
    * Generate a downloadable file and trigger browser download.
    * The file can be manually saved to OneDrive or imported on another device.
    */
-  triggerDownload() {
-    const { blob, filename } = this.exportAsFile();
+  async triggerDownload() {
+    const { blob, filename } = await this.exportAsFile();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
