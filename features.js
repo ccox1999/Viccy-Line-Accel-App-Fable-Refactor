@@ -32,12 +32,20 @@
  *        TIME STRUCTURE — which way the S swings first, when, and how much
  *        switch-clatter roughness each segment of the approach carries —
  *        which is exactly what the approach_* features capture.
+ *   v5 — the arrival anchor no longer REQUIRES an 8 s stationary dwell: real
+ *        trips showed the user stops recording ~2 s after the train halts
+ *        (sometimes while it is still crawling), so v4's anchor never fired
+ *        and the approach windows drifted onto phone-handling motion. The
+ *        anchor now falls through three tiers (long dwell → short dwell near
+ *        the end of the recording → end-of-braking with the trailing
+ *        phone-grab burst trimmed), which changes the effective windows for
+ *        any recording without a long dwell — hence the version bump.
  * Stored examples keep their raw motion data (IndexedDB via raw-store.js), so
  * TrainingSet.reprocessFeatures can transparently re-extract them to the
  * current definition instead of silently mixing two incompatible feature
  * scales in one training set.
  */
-export const FEATURE_VERSION = 4;
+export const FEATURE_VERSION = 5;
 
 /** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
 export const FORK_WINDOW_SEC = 10;
@@ -103,6 +111,33 @@ const FORK_YAW_SELECT_CLIP = 30;
  */
 const STATIONARY_ACCEL_RMS = 0.2;
 const MIN_TERMINAL_STOP_SEC = 8;
+
+/**
+ * Anchor tiers 2 and 3 — locating the arrival WITHOUT a long stationary
+ * dwell, because in practice the recording is stopped within a couple of
+ * seconds of the train halting (real trips 2026-07-14/16/17 contained no 8 s
+ * quiet stretch at all; one never even dropped below the stationary
+ * threshold before the phone was picked up).
+ *
+ * SHORT_STOP_SEC       — minimum quiet run that still counts as "the train
+ *   is at rest" when it sits near the END of the recording (tier 2). 1 s is
+ *   enough there: scanning backwards from the end, the LAST quiet run in the
+ *   tail is the arrival — walking/handling never produces sub-threshold runs.
+ * TAIL_SEARCH_SEC      — how far back from the end tier 2 looks for that
+ *   short quiet run (covers stopping the recording after a short walk-off).
+ * NEAR_STOP_RMS        — tier 3 gate: the seconds before the anchor must be
+ *   at crawl level (below this), so a recording cut mid-cruise (live
+ *   forecast, aborted trip) does NOT get treated as an arrival.
+ * HANDLING_TRIM_MAX_SEC / HANDLING_TRIM_RATIO — tier 3 trims up to this many
+ *   trailing seconds whose horizontal-accel RMS jumps to ratio× the level of
+ *   the preceding ~10 s (the signature of grabbing the phone to stop the
+ *   recording).
+ */
+const SHORT_STOP_SEC = 1.0;
+const TAIL_SEARCH_SEC = 45;
+const NEAR_STOP_RMS = 0.45;
+const HANDLING_TRIM_MAX_SEC = 6;
+const HANDLING_TRIM_RATIO = 1.8;
 
 /**
  * Extract features from a motion data window.
@@ -680,7 +715,8 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
   return {
     version: 1,
     anchored: !!anchor,          // false → restSec is just the end of the data
-    restSec: round3(cease / hz), // rest point, seconds from recording start
+    anchorType: anchor ? anchor.type : null, // "dwell" | "short-stop" | "end-of-braking"
+    restSec: round3(cease / hz), // arrival point, seconds from recording start
     yaw,                         // °/s, clipped ±FORK_YAW_SELECT_CLIP, oldest first
     vertRms,                     // m/s², roughness
     horizRms,                    // m/s², braking/cornering (speed proxy)
@@ -688,54 +724,123 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
 }
 
 /**
- * Locate the fork window by anchoring to the train's final stop at Brixton.
+ * Locate the fork window by anchoring to the train's arrival at Brixton.
  *
- * Returns `{start, cease}` — the start index of a `w`-sample window ending
- * where the train comes to rest, and that rest index itself — or null if no
- * clean terminal stop is found (the caller then falls back to the
+ * Returns `{start, cease, type}` — the start index of a `w`-sample window
+ * ending where the train arrives, that arrival index, and which tier found
+ * it — or null if no arrival is present (the caller then falls back to the
  * yaw-amplitude selector).
  *
- * A "stop" is a stretch of at least MIN_TERMINAL_STOP_SEC whose mean horizontal
- * acceleration sits below STATIONARY_ACCEL_RMS. We scan from the END so we lock
- * onto the LAST stop (the terminus), not a mid-route signal hold, then walk back
- * to where motion actually ceased — the window's end. The window immediately
- * before the stop must itself contain motion; if it is quiet too, this stop
- * follows another stop (e.g. standing on the platform after alighting) and the
- * real approach is earlier, so we keep scanning.
+ * Three tiers, tried in order. The recording does NOT need to end with a
+ * stretch of stillness — in practice it is stopped within a couple of
+ * seconds of the train halting, sometimes before it fully halts:
+ *
+ *  1. "dwell"      — a stationary stretch ≥ MIN_TERMINAL_STOP_SEC anywhere,
+ *                    scanned from the END so it locks onto the LAST stop
+ *                    (the terminus, not a mid-route signal hold), walked
+ *                    back to the moment motion ceased. The window before it
+ *                    must itself contain motion (else it's a stop after a
+ *                    stop — e.g. standing on the platform — and the real
+ *                    approach is earlier). The most reliable tier.
+ *  2. "short-stop" — no long dwell, but a quiet run ≥ SHORT_STOP_SEC inside
+ *                    the last TAIL_SEARCH_SEC. Scanning backwards, the LAST
+ *                    such run is the arrival: neither walking nor phone
+ *                    handling produces sub-threshold runs, so a trailing
+ *                    grab-the-phone burst after it is skipped naturally.
+ *  3. "end-of-braking" — the train never quite registered as stationary
+ *                    (recording stopped while it was still crawling in, or
+ *                    the phone was already in hand). Trim up to
+ *                    HANDLING_TRIM_MAX_SEC trailing seconds whose level
+ *                    jumps to HANDLING_TRIM_RATIO× the preceding ~10 s (the
+ *                    grab), then anchor at the trimmed end — but ONLY if
+ *                    what remains ends at crawl level (< NEAR_STOP_RMS), so
+ *                    a recording cut mid-cruise is not mistaken for an
+ *                    arrival.
  *
  * @param {Float64Array} prefHorizSq - prefix sums of squared horizontal accel
  * @param {Int32Array} prefValid - prefix sums of gravity-valid samples
  * @param {number} n - sample count
  * @param {number} w - window length in samples
  * @param {number} sampleRateHz - sampling rate
- * @returns {{start: number, cease: number}|null}
+ * @returns {{start: number, cease: number, type: string}|null}
  */
 function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
-  const minStop = Math.max(2, Math.round(MIN_TERMINAL_STOP_SEC * sampleRateHz));
-  if (n < minStop) return null;
-
   // RMS of horizontal accel over [a, b); Infinity if too little gravity to judge.
   const blockRms = (a, b) => {
     const cnt = prefValid[b] - prefValid[a];
-    if (cnt < (b - a) * 0.5) return Infinity;
+    if (b <= a || cnt < (b - a) * 0.5) return Infinity;
     return Math.sqrt((prefHorizSq[b] - prefHorizSq[a]) / cnt);
   };
-  // True if a stop of length minStop begins at c.
-  const isStop = (c) =>
-    c + minStop <= n && blockRms(c, c + minStop) < STATIONARY_ACCEL_RMS;
+  // The pre-arrival window must contain actual motion for every tier.
+  const approachOK = (cease) =>
+    cease - w >= 0 && blockRms(cease - w, cease) >= STATIONARY_ACCEL_RMS;
 
-  let c = n - minStop;
-  while (c >= 0) {
-    if (!isStop(c)) { c--; continue; }
-    // Walk down to the onset of this stationary stretch = the moment of rest.
-    let cease = c;
-    while (cease - 1 >= 0 && isStop(cease - 1)) cease--;
-    const winStart = cease - w;
-    if (winStart >= 0 && blockRms(winStart, cease) >= STATIONARY_ACCEL_RMS) {
-      return { start: winStart, cease };
+  // ---- Tier 1: long stationary dwell ----
+  const minStop = Math.max(2, Math.round(MIN_TERMINAL_STOP_SEC * sampleRateHz));
+  if (n >= minStop) {
+    const isStop = (c) =>
+      c + minStop <= n && blockRms(c, c + minStop) < STATIONARY_ACCEL_RMS;
+    let c = n - minStop;
+    while (c >= 0) {
+      if (!isStop(c)) { c--; continue; }
+      // Walk down to the onset of this stationary stretch = moment of rest.
+      let cease = c;
+      while (cease - 1 >= 0 && isStop(cease - 1)) cease--;
+      if (approachOK(cease)) return { start: cease - w, cease, type: "dwell" };
+      c = cease - 1; // preceded by quiet (or runs off the start) — look earlier
     }
-    c = cease - 1; // this stop is preceded by quiet (or runs off the start) — look earlier
   }
+
+  // ---- Tier 2: short quiet run near the end of the recording ----
+  const shortStop = Math.max(2, Math.round(SHORT_STOP_SEC * sampleRateHz));
+  const tailStart = Math.max(0, n - Math.round(TAIL_SEARCH_SEC * sampleRateHz));
+  const stride = Math.max(1, Math.round(sampleRateHz / 4)); // ~0.25 s steps
+  if (n >= shortStop) {
+    const isQuiet = (c) =>
+      c >= 0 && c + shortStop <= n && blockRms(c, c + shortStop) < STATIONARY_ACCEL_RMS;
+    for (let c = n - shortStop; c >= tailStart; c -= stride) {
+      if (!isQuiet(c)) continue;
+      let cease = c;
+      while (cease - 1 >= 0 && isQuiet(cease - 1)) cease--;
+      if (approachOK(cease)) return { start: cease - w, cease, type: "short-stop" };
+      break; // quiet run exists but no moving approach before it — give up on tier 2
+    }
+  }
+
+  // ---- Tier 3: recording ends while braking to the stop ----
+  const sec = Math.max(1, Math.round(sampleRateHz));
+  // Grab detection references the MINIMUM of the preceding few seconds, not
+  // their mean: the tail of a real arrival is a braking ramp (high → low),
+  // and a mean over the ramp is inflated enough to hide the grab spike.
+  const minRecentRms = (b) => {
+    let m = Infinity;
+    for (let k = 1; k <= 4; k++) {
+      const a = b - (k + 1) * sec;
+      if (a < 0) break;
+      m = Math.min(m, blockRms(a, a + sec));
+    }
+    return m;
+  };
+  let cease = n;
+  for (let trims = 0; trims < HANDLING_TRIM_MAX_SEC; trims++) {
+    const last = blockRms(cease - sec, cease);
+    const ref = minRecentRms(cease);
+    if (
+      Number.isFinite(last) && Number.isFinite(ref) &&
+      last > ref * HANDLING_TRIM_RATIO && last > NEAR_STOP_RMS
+    ) {
+      cease -= sec; // trailing handling burst — trim and look again
+    } else {
+      break;
+    }
+  }
+  if (
+    blockRms(Math.max(0, cease - 2 * sec), cease) < NEAR_STOP_RMS &&
+    approachOK(cease)
+  ) {
+    return { start: cease - w, cease, type: "end-of-braking" };
+  }
+
   return null;
 }
 

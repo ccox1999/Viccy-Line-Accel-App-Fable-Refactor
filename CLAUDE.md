@@ -1,6 +1,21 @@
 # Victoria Line Motion Lab — Project Context
 
-## Current state (2026-07-09) — dataset analysis + raw-data fix + feature v4
+## Current state (2026-07-19) — v5: arrival anchor no longer needs stillness
+
+Post-fix real trips (2026-07-14/16/17, all with full raw data — the IndexedDB fix works) revealed the user's actual recording habit: the recording is stopped within ~2 s of the train halting, sometimes while it is still crawling, so the v4 anchor's required 8 s stationary dwell NEVER exists and every trip fell to the unanchored trailing window (contaminated by the phone-grab burst). **The anchor must not require stillness at the end — user requirement.**
+
+`anchoredForkWindow` is now three tiers, tried in order (returns `{start, cease, type}`):
+1. **"dwell"** — the old ≥8 s stationary stretch, scanned from the end (unchanged, most reliable; catches walk-off recordings like the 07-09 trip).
+2. **"short-stop"** — a quiet run ≥1 s (`SHORT_STOP_SEC`) within the last 45 s (`TAIL_SEARCH_SEC`): scanning backwards, the LAST sub-threshold run is the arrival, since walking/handling never produces one; a trailing grab burst is skipped naturally.
+3. **"end-of-braking"** — no quiet run at all (stopped while crawling): trim up to 6 trailing seconds whose RMS jumps >1.8× (`HANDLING_TRIM_RATIO`) the **minimum** of the preceding 4 s (min, not mean — the braking ramp inflates a mean and hides the grab spike), then anchor at the trimmed end, gated on the last 2 s being at crawl level (< `NEAR_STOP_RMS` 0.45) so a mid-cruise cut is never mistaken for an arrival.
+
+**FEATURE_VERSION → 5** (window semantics changed for any recording without a long dwell) — on next load/restore every raw-carrying example re-extracts and gets a fresh profile; profiles now record `anchorType`. Validated on all 4 real raw trips (dwell / short-stop ×2 / end-of-braking, arrival points sensible, tails excluded) and in the harness: `__v4-test.html` now 35 assertions (G1–G6 cover the three tail habits, feature agreement between dwell and stop-at-halt tails of the same physics, and the mid-cruise no-anchor gate); `__restore-test.html` 7 assertions proves the real 4-trip restore file re-extracts to v5 with ALL FOUR ANCHORED. Known transient: during live recording, a smooth/slow moment can briefly satisfy tier 3 and anchor the rolling forecast early — harmless (re-evaluated every second), never affects stored training data. sw cache **v24**.
+
+Current dataset: `victoria-training-2026-07-19-3L1R-raw-only.json` (parent folder) = the 4 real full-raw trips (3L/1R). The 28 few-second test blips from 07-09 and the 9 raw-less old trips are excluded. Classifier needs 5+ per side — right-platform trips are the bottleneck (1 raw right total).
+
+---
+
+## Previous state (2026-07-09) — dataset analysis + raw-data fix + feature v4
 
 Analysed the first 11 REAL labelled trips (`victoria-training-2026-07-09-5L6R.json`, 5L/6R, kept outside the repo). Three findings drove this session's changes:
 
