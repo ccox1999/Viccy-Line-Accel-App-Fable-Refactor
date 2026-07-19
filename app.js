@@ -59,7 +59,10 @@ async function loadMLModules() {
 
   // Series definitions — colours kept in sync with style.css variables.
   const ACCEL_CHART = {
-    yMin: -4, yMax: 4, step: 1,
+    // ±1 g: train motion lives well inside ±1 g of linear acceleration, so
+    // the old ±4 g range squashed the interesting detail into the middle
+    // half of the chart. Values beyond the range simply draw off-canvas.
+    yMin: -1, yMax: 1, step: 0.5,
     label: (v) => `${v.toFixed(1)} g`,
     series: [
       { color: "#ff375f", accessor: (e) => e.ax / GRAVITY },
