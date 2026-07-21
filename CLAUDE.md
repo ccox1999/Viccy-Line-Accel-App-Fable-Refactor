@@ -1,6 +1,18 @@
 # Victoria Line Motion Lab — Project Context
 
-## Current state (2026-07-19) — v5: arrival anchor no longer needs stillness
+## Current state (2026-07-21) — 7-trip analysis: Fisher-weighting threshold raised 3→5
+
+Analysed the current dataset (`Newest vibration data.json`, 7 real trips, 4L/3R, all with full raw data and correctly v5-anchored — 4 dwell, 2 short-stop, 1 end-of-braking; anchor type does NOT correlate with label, ruling out a windowing-artifact confound). Headline finding, established by proper permutation test (re-ranking/re-fitting inside every shuffle, not just the real fold): **the deployed classifier (all 27 orientation-invariant features, Fisher-weighted from 3/class) scored LOOCV 1/7 — worse than 93–97% of random label permutations.** That's not "no signal", it's actively anti-correlated: with only 3–4 examples per class, Fisher's within-class spread estimate is itself too noisy to trust, so it amplifies incidental noise directions instead of the real one. Disabling Fisher weighting at the same n (plain uniform z-scored kNN) reverted to unremarkable chance-level accuracy (2–3/7, p≈0.6) — confirming the weighting mechanism, not the data, was the problem.
+
+**Fix:** [classifier.js](classifier.js) `KNNClassifier._ensureNormCache` — Fisher-weighting activation threshold raised from `>= 3` to `>= 5` per class, matching the bar `selectBestModel`'s CV search already requires elsewhere before trusting anything data-driven. Pure classifier-side change, no feature extraction touched, so FEATURE_VERSION is unaffected — no re-extraction or user action needed, takes effect on the next classifier build. Verified via harness (36 assertions; new H1 confirms Fisher weighting still correctly resolves a borderline case once 5/class is reached — the fix doesn't break the mechanism, just gates it appropriately). Full Python permutation-test scripts from this session are NOT saved in-repo (scratch analysis); rerun similarly against any future export if revisiting.
+
+**Diagnostic-only teaser (not validated, do not deploy on this alone):** among individual features, `approach_yaw_lead` and `approach_yaw_trend` (the S-bend swing-order features) direction roughly matches the physics hypothesis again (right trips lean toward positive lead / near-zero trend, left trips negative lead / positive trend), and single-feature threshold LOOCV hits 5/7 on several candidates — but at n=7 this is exactly the kind of cherry-picked-from-27-features result the permutation testing above shows can't be trusted yet. No feature-set change made on this basis.
+
+**Status:** still below the 5/class bar for the classifier's own CV-search and Fisher weighting to activate meaningfully (4L/3R). Next 1–2 right-platform trips are the most valuable data — right is the bottleneck side.
+
+---
+
+## Previous state (2026-07-19) — v5: arrival anchor no longer needs stillness
 
 Post-fix real trips (2026-07-14/16/17, all with full raw data — the IndexedDB fix works) revealed the user's actual recording habit: the recording is stopped within ~2 s of the train halting, sometimes while it is still crawling, so the v4 anchor's required 8 s stationary dwell NEVER exists and every trip fell to the unanchored trailing window (contaminated by the phone-grab burst). **The anchor must not require stillness at the end — user requirement.**
 
