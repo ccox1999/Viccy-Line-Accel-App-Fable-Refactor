@@ -293,10 +293,18 @@ export class KNNClassifier {
       else if (ex.label === "right") rightIdx.push(i);
     });
 
-    // Fisher weighting needs a few examples of EACH class to estimate
-    // within-class spread; with 1–2 it just chases that one point's noise.
-    // Below the threshold, fall back to uniform weights (plain z-scored k-NN).
-    if (leftIdx.length >= 3 && rightIdx.length >= 3) {
+    // Fisher weighting needs enough examples of EACH class to estimate
+    // within-class spread reliably; below that it chases noise instead of
+    // signal. This isn't theoretical: on the real 2026-07-19 dataset (4
+    // left / 3 right), Fisher weighting at the old threshold of 3 produced
+    // LOOCV 1/7 — worse than 93–97% of random label permutations (verified
+    // by permutation test), i.e. actively anti-correlated with truth, not
+    // merely uninformative. Disabling it at that same sample size (uniform
+    // weights) reverted to unremarkable chance-level accuracy. 5 matches the
+    // bar the rest of the pipeline (selectBestModel's CV search) already
+    // requires before trusting anything data-driven — below it, fall back
+    // to uniform weights (plain z-scored k-NN).
+    if (leftIdx.length >= 5 && rightIdx.length >= 5) {
       const classStats = (idxs, key) => {
         let total = 0;
         for (const i of idxs) total += vectors[i][key] ?? 0;
