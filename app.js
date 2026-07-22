@@ -272,8 +272,10 @@ async function loadMLModules() {
       // current definition (fork-localised windows + approach shape),
       // re-extracting from their stored raw motion data so the whole set is
       // on one consistent scale — and backfill missing approach profiles.
+      // recordingComplete=true: every stored example is, by definition, a
+      // finished recording (see extractForkFeatures' tier 4).
       const changed = await state.trainSet.reprocessFeatures(
-        ml.features.extractForkFeatures,
+        (raw, hz) => ml.features.extractForkFeatures(raw, hz, undefined, true),
         ml.features.FEATURE_VERSION,
         60,
         ml.features.computeApproachProfile
@@ -427,9 +429,9 @@ async function loadMLModules() {
         // trip vs extractForkFeatures over a 10 s window differ in the
         // length-dependent features — energy, FFT — which would otherwise make
         // the fake data its own little cluster).
-        const left = ml.features.extractForkFeatures(makeFakeTrip("left", turnRate), 60);
+        const left = ml.features.extractForkFeatures(makeFakeTrip("left", turnRate), 60, undefined, true);
         state.trainSet.add(left, "left", { notes: `Fake left ${i}`, featureVersion: fv });
-        const right = ml.features.extractForkFeatures(makeFakeTrip("right", turnRate), 60);
+        const right = ml.features.extractForkFeatures(makeFakeTrip("right", turnRate), 60, undefined, true);
         state.trainSet.add(right, "right", { notes: `Fake right ${i}`, featureVersion: fv });
       }
 
@@ -662,8 +664,11 @@ async function loadMLModules() {
       // Extract features from the FORK WINDOW of the recording, not the whole
       // trip — the left/right signal is a brief sustained yaw that whole-trip
       // averaging dilutes away (see extractForkFeatures). Same function the
-      // live forecast uses, so training and inference features match.
-      const features = ml.features.extractForkFeatures(state.data, 60);
+      // live forecast uses, so training and inference features match, EXCEPT
+      // recordingComplete=true here: the user has just tapped Stop, so the
+      // anchor's tier 4 may trust this recording's own end when no earlier
+      // tier finds a clean stop (see extractForkFeatures / anchoredForkWindow).
+      const features = ml.features.extractForkFeatures(state.data, 60, undefined, true);
 
       // Add features + full raw motion data to training set.
       // `.time` is an absolute performance.now() value, so the recording's
@@ -1320,8 +1325,10 @@ async function loadMLModules() {
         // extractor; bring them onto the current definition immediately (not
         // just on next load) so the merged set is internally consistent —
         // and backfill approach profiles for any example carrying raw data.
+        // recordingComplete=true: a restored example is, by definition, a
+        // finished recording (see extractForkFeatures' tier 4).
         await state.trainSet.reprocessFeatures(
-          ml.features.extractForkFeatures,
+          (raw, hz) => ml.features.extractForkFeatures(raw, hz, undefined, true),
           ml.features.FEATURE_VERSION,
           60,
           ml.features.computeApproachProfile

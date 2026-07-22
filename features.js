@@ -40,12 +40,28 @@
  *        the end of the recording → end-of-braking with the trailing
  *        phone-grab burst trimmed), which changes the effective windows for
  *        any recording without a long dwell — hence the version bump.
+ *   v6 — tiers 1/2 reject a candidate stop if meaningful motion resumes
+ *        before the recording ends (a brief trailing handling burst is
+ *        tolerated): real trips showed Brixton, a busy terminus, sometimes
+ *        makes the train wait BEFORE the platform is clear, and v5's anchor
+ *        was landing on that wait — not the true arrival — on 5 of 9 real
+ *        trips, evidenced by 30–70 s of further genuine travel following it
+ *        with no second clean stop before the recording ended. Also adds a
+ *        4th tier ("assume-complete", extractForkFeatures/
+ *        computeApproachProfile's new `recordingComplete` parameter) that
+ *        trusts a FINISHED recording's own (grab-trimmed) endpoint when no
+ *        tier 1–3 candidate qualifies, since no signal-only heuristic
+ *        reliably tells "genuinely arrived, imperfectly settled" from "still
+ *        moving" (real mid-journey cruising produces equally strong
+ *        apparent braking trends 20–55% of the time) — only reachable for a
+ *        recording the caller guarantees is complete, never for the live
+ *        forecast, so live-forecast behaviour is unaffected.
  * Stored examples keep their raw motion data (IndexedDB via raw-store.js), so
  * TrainingSet.reprocessFeatures can transparently re-extract them to the
  * current definition instead of silently mixing two incompatible feature
  * scales in one training set.
  */
-export const FEATURE_VERSION = 5;
+export const FEATURE_VERSION = 6;
 
 /** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
 export const FORK_WINDOW_SEC = 10;
@@ -132,12 +148,19 @@ const MIN_TERMINAL_STOP_SEC = 8;
  *   trailing seconds whose horizontal-accel RMS jumps to ratio× the level of
  *   the preceding ~10 s (the signature of grabbing the phone to stop the
  *   recording).
+ * GRAB_ALLOWANCE_SEC — tiers 1/2's "quiet remainder" check (does meaningful
+ *   motion resume before the recording ends, meaning the candidate stop
+ *   isn't the final one) ignores this many trailing seconds, so a normal
+ *   stop-the-recording handling burst doesn't itself look like "motion
+ *   resumed" and wrongly veto a genuine late arrival. Matches
+ *   HANDLING_TRIM_MAX_SEC.
  */
 const SHORT_STOP_SEC = 1.0;
 const TAIL_SEARCH_SEC = 45;
 const NEAR_STOP_RMS = 0.45;
 const HANDLING_TRIM_MAX_SEC = 6;
 const HANDLING_TRIM_RATIO = 1.8;
+const GRAB_ALLOWANCE_SEC = 6;
 
 /**
  * Extract features from a motion data window.
@@ -439,9 +462,13 @@ export function extractFeatures(motionWindow, sampleRateHz = 60) {
  * @param {Array} motionData - full recording
  * @param {number} sampleRateHz - sampling rate
  * @param {number} windowSec - window length in seconds
+ * @param {boolean} recordingComplete - true ONLY when the caller can guarantee
+ *   this recording is finished (the user has already tapped Stop, or it was
+ *   loaded from a saved example) — see anchoredForkWindow's tier 4 for why
+ *   this matters. The live forecast MUST leave this false.
  * @returns {Object} feature vector (same shape as extractFeatures)
  */
-export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = FORK_WINDOW_SEC) {
+export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = FORK_WINDOW_SEC, recordingComplete = false) {
   if (!motionData || motionData.length < 2) return getNullFeatures();
 
   const n = motionData.length;
@@ -462,7 +489,7 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
   // recording), the approach features describe the trailing end of the data
   // so far — which converges on the anchored definition as the train
   // actually arrives.
-  const anchor = anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, sampleRateHz);
+  const anchor = anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, sampleRateHz, recordingComplete);
   const cease = anchor ? anchor.cease : n;
   const approach = approachFeatures(pre, cease, sampleRateHz);
 
@@ -684,6 +711,10 @@ function getNullApproachFeatures() {
  * time-resolved picture of its approach that new window/shape ideas can be
  * tested against offline.
  *
+ * Always called on a FINISHED recording (post-Stop, or a saved example being
+ * reprocessed) — never live mid-trip — so this always anchors with tier 4
+ * ("assume-complete") available; see anchoredForkWindow.
+ *
  * @param {Array} motionData - full recording
  * @param {number} sampleRateHz
  * @returns {Object|null} { version, anchored, restSec, yaw[], vertRms[], horizRms[] }
@@ -696,7 +727,7 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
   const pre = motionPrefixes(motionData);
   if (pre.prefValid[n] < Math.min(n, w) * 0.5) return null; // gravity-less (old) data
 
-  const anchor = n > w ? anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, hz) : null;
+  const anchor = n > w ? anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, hz, true) : null;
   const cease = anchor ? anchor.cease : n;
 
   const seconds = Math.min(PROFILE_SEC, Math.floor(cease / hz));
@@ -731,7 +762,7 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
  * it — or null if no arrival is present (the caller then falls back to the
  * yaw-amplitude selector).
  *
- * Three tiers, tried in order. The recording does NOT need to end with a
+ * Four tiers, tried in order. The recording does NOT need to end with a
  * stretch of stillness — in practice it is stopped within a couple of
  * seconds of the train halting, sometimes before it fully halts:
  *
@@ -741,12 +772,10 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
  *                    back to the moment motion ceased. The window before it
  *                    must itself contain motion (else it's a stop after a
  *                    stop — e.g. standing on the platform — and the real
- *                    approach is earlier). The most reliable tier.
+ *                    approach is earlier).
  *  2. "short-stop" — no long dwell, but a quiet run ≥ SHORT_STOP_SEC inside
  *                    the last TAIL_SEARCH_SEC. Scanning backwards, the LAST
- *                    such run is the arrival: neither walking nor phone
- *                    handling produces sub-threshold runs, so a trailing
- *                    grab-the-phone burst after it is skipped naturally.
+ *                    such run is the arrival.
  *  3. "end-of-braking" — the train never quite registered as stationary
  *                    (recording stopped while it was still crawling in, or
  *                    the phone was already in hand). Trim up to
@@ -756,15 +785,44 @@ export function computeApproachProfile(motionData, sampleRateHz = 60) {
  *                    what remains ends at crawl level (< NEAR_STOP_RMS), so
  *                    a recording cut mid-cruise is not mistaken for an
  *                    arrival.
+ *  4. "assume-complete" — only tried when `complete` is true (the caller
+ *                    guarantees this recording is FINISHED — the user has
+ *                    already tapped Stop). Real trips showed Brixton, a busy
+ *                    terminus, sometimes makes the train wait BEFORE the
+ *                    platform is clear — tiers 1–3 would anchor on that wait
+ *                    instead of the true arrival, since 30–70 s of further
+ *                    genuine travel can follow it without ever settling
+ *                    below the stationary thresholds by the recording's end
+ *                    (residual jostle at a busy platform, doors, etc.). For
+ *                    a COMPLETE recording, trust the caller's guarantee and
+ *                    take the grab-trimmed end unconditionally — there is no
+ *                    reliable SIGNAL that distinguishes "genuinely arrived,
+ *                    imperfectly settled" from "still moving" (tested: real
+ *                    mid-journey cruising produces equally strong apparent
+ *                    braking trends 20–55% of the time), so this tier
+ *                    deliberately leans on external knowledge the signal
+ *                    alone can't provide. NEVER reachable when `complete` is
+ *                    false — the live forecast is completely unaffected.
+ *
+ * Tiers 1 and 2 additionally require the QUIET REMAINDER after their
+ * candidate: no sustained motion between the candidate and the end of the
+ * data (a brief trailing grab is tolerated) — otherwise the candidate is
+ * almost certainly an early hold, not the final arrival, and is rejected in
+ * favour of an earlier candidate or a later tier. This check re-scans only
+ * the UNTESTED remainder after the window `isStop`/`isQuiet` already proved
+ * quiet, to avoid a false positive from `cease` landing mid-sample at a
+ * second boundary.
  *
  * @param {Float64Array} prefHorizSq - prefix sums of squared horizontal accel
  * @param {Int32Array} prefValid - prefix sums of gravity-valid samples
  * @param {number} n - sample count
  * @param {number} w - window length in samples
  * @param {number} sampleRateHz - sampling rate
+ * @param {boolean} complete - true when the caller guarantees this is a
+ *   finished recording (see tier 4). Defaults false (safe/conservative).
  * @returns {{start: number, cease: number, type: string}|null}
  */
-function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
+function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz, complete = false) {
   // RMS of horizontal accel over [a, b); Infinity if too little gravity to judge.
   const blockRms = (a, b) => {
     const cnt = prefValid[b] - prefValid[a];
@@ -774,6 +832,23 @@ function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
   // The pre-arrival window must contain actual motion for every tier.
   const approachOK = (cease) =>
     cease - w >= 0 && blockRms(cease - w, cease) >= STATIONARY_ACCEL_RMS;
+
+  const grabSamples = Math.round(GRAB_ALLOWANCE_SEC * sampleRateHz);
+  const sec1 = Math.max(1, Math.round(sampleRateHz));
+  // No 1 s block between [cease+validatedSpan, n-grabAllowance) may exceed
+  // STATIONARY_ACCEL_RMS. Starting from cease+validatedSpan (not cease
+  // itself) skips re-testing the span the caller's isStop/isQuiet window
+  // already proved quiet — cease can land mid-sample at that window's onset,
+  // and re-checking from there risks a false positive from a fractional
+  // sliver of the pre-stop motion bleeding into the first re-test block.
+  const quietRemainder = (cease, validatedSpan) => {
+    const start = cease + validatedSpan;
+    const end = Math.max(start, n - grabSamples);
+    for (let c = start; c + sec1 <= end; c += sec1) {
+      if (blockRms(c, c + sec1) >= STATIONARY_ACCEL_RMS) return false;
+    }
+    return true;
+  };
 
   // ---- Tier 1: long stationary dwell ----
   const minStop = Math.max(2, Math.round(MIN_TERMINAL_STOP_SEC * sampleRateHz));
@@ -786,7 +861,9 @@ function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
       // Walk down to the onset of this stationary stretch = moment of rest.
       let cease = c;
       while (cease - 1 >= 0 && isStop(cease - 1)) cease--;
-      if (approachOK(cease)) return { start: cease - w, cease, type: "dwell" };
+      if (approachOK(cease) && quietRemainder(cease, minStop)) {
+        return { start: cease - w, cease, type: "dwell" };
+      }
       c = cease - 1; // preceded by quiet (or runs off the start) — look earlier
     }
   }
@@ -802,8 +879,10 @@ function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
       if (!isQuiet(c)) continue;
       let cease = c;
       while (cease - 1 >= 0 && isQuiet(cease - 1)) cease--;
-      if (approachOK(cease)) return { start: cease - w, cease, type: "short-stop" };
-      break; // quiet run exists but no moving approach before it — give up on tier 2
+      if (approachOK(cease) && quietRemainder(cease, shortStop)) {
+        return { start: cease - w, cease, type: "short-stop" };
+      }
+      c -= stride; // this quiet run doesn't qualify — keep scanning backward
     }
   }
 
@@ -821,24 +900,29 @@ function anchoredForkWindow(prefHorizSq, prefValid, n, w, sampleRateHz) {
     }
     return m;
   };
-  let cease = n;
+  let cease3 = n;
   for (let trims = 0; trims < HANDLING_TRIM_MAX_SEC; trims++) {
-    const last = blockRms(cease - sec, cease);
-    const ref = minRecentRms(cease);
+    const last = blockRms(cease3 - sec, cease3);
+    const ref = minRecentRms(cease3);
     if (
       Number.isFinite(last) && Number.isFinite(ref) &&
       last > ref * HANDLING_TRIM_RATIO && last > NEAR_STOP_RMS
     ) {
-      cease -= sec; // trailing handling burst — trim and look again
+      cease3 -= sec; // trailing handling burst — trim and look again
     } else {
       break;
     }
   }
   if (
-    blockRms(Math.max(0, cease - 2 * sec), cease) < NEAR_STOP_RMS &&
-    approachOK(cease)
+    blockRms(Math.max(0, cease3 - 2 * sec), cease3) < NEAR_STOP_RMS &&
+    approachOK(cease3)
   ) {
-    return { start: cease - w, cease, type: "end-of-braking" };
+    return { start: cease3 - w, cease: cease3, type: "end-of-braking" };
+  }
+
+  // ---- Tier 4: assume-complete (only for finished recordings) ----
+  if (complete && approachOK(cease3)) {
+    return { start: cease3 - w, cease: cease3, type: "assume-complete" };
   }
 
   return null;
