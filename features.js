@@ -61,7 +61,7 @@
  * current definition instead of silently mixing two incompatible feature
  * scales in one training set.
  */
-export const FEATURE_VERSION = 7;
+export const FEATURE_VERSION = 6;
 
 /** Seconds of data the fork-localised feature window spans (see extractForkFeatures). */
 export const FORK_WINDOW_SEC = 10;
@@ -95,8 +95,6 @@ export const ORIENTATION_INVARIANT_KEYS = [
   "approach_yaw_net", "approach_yaw_trend", "approach_yaw_swing",
   "approach_yaw_lead",
   "approach_vert_rms_early", "approach_vert_rms_mid", "approach_vert_rms_late",
-  // v7: braking-timing shape feature
-  "approach_braking_com",
 ];
 
 /**
@@ -476,14 +474,14 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
   const n = motionData.length;
   const w = Math.round(windowSec * sampleRateHz);
   if (w < 2 || n <= w) {
-    return { ...getNullApproachFeatures(), approach_anchored: false, ...extractFeatures(motionData, sampleRateHz) };
+    return { ...getNullApproachFeatures(), ...extractFeatures(motionData, sampleRateHz) };
   }
 
   const pre = motionPrefixes(motionData);
 
   // Not enough gravity samples anywhere (old data) → whole-recording fallback.
   if (pre.prefValid[n] < w * 0.5) {
-    return { ...getNullApproachFeatures(), approach_anchored: false, ...extractFeatures(motionData, sampleRateHz) };
+    return { ...getNullApproachFeatures(), ...extractFeatures(motionData, sampleRateHz) };
   }
 
   // PRIMARY: route-anchored window ending at the Brixton terminus stop. When
@@ -493,15 +491,7 @@ export function extractForkFeatures(motionData, sampleRateHz = 60, windowSec = F
   // actually arrives.
   const anchor = anchoredForkWindow(pre.prefHorizSq, pre.prefValid, n, w, sampleRateHz, recordingComplete);
   const cease = anchor ? anchor.cease : n;
-  // approach_anchored (boolean, not a numeric feature — deliberately invisible
-  // to Number.isFinite-based feature scans in classifier.js) tells the LIVE
-  // forecast whether there's real evidence of deceleration into the terminus
-  // (a genuine dwell/short-stop/end-of-braking tier fired), vs. just "here's
-  // whatever's in the trailing 20 s of data so far". Without this, ordinary
-  // mid-journey noise could coincidentally resemble a trained class and the
-  // live percentage would show a confident-looking but meaningless answer
-  // long before the fork has actually happened. See makeLivePrediction().
-  const approach = approachFeatures(pre, cease, sampleRateHz, !!anchor);
+  const approach = approachFeatures(pre, cease, sampleRateHz);
 
   if (anchor) {
     return {
@@ -597,13 +587,6 @@ function spanVertRms(pre, a, b) {
   return Math.sqrt((pre.prefVertSq[b] - pre.prefVertSq[a]) / v);
 }
 
-/** Horizontal-accel RMS over [a, b), or null when unjudgeable. */
-function spanHorizRms(pre, a, b) {
-  const v = pre.prefValid[b] - pre.prefValid[a];
-  if (b <= a || v < (b - a) * 0.5) return null;
-  return Math.sqrt((pre.prefHorizSq[b] - pre.prefHorizSq[a]) / v);
-}
-
 /**
  * APPROACH-SHAPE features: the left/right discriminators that survive the
  * physics of a parallel-road junction.
@@ -630,15 +613,6 @@ function spanHorizRms(pre, a, b) {
  *  - approach_vert_rms_early/mid/late: gravity-projected vertical
  *    acceleration RMS per third — switch clatter is a roughness burst, and
  *    its position in the approach differs between roads.
- *  - approach_braking_com: weighted-average time (seconds before rest,
- *    negative→0) of horizontal-accel RMS over the last 20 s — WHEN the
- *    braking/cornering effort is concentrated. The two fork routes cover
- *    slightly different remaining distance to the platform after
- *    diverging, so the braking curve within a fixed time-before-stop
- *    window can start at a measurably different point. A real but
- *    independent mechanism from the yaw features (found by inspecting
- *    horizRms shapes across trips 2026-07-30; LOOCV 75%/p=0.20 alone,
- *    combined with approach_yaw_trend: LOOCV 83.3%/p=0.013 — see classifier.js).
  *
  * All quantities are gravity-projected or magnitudes → orientation-invariant.
  * Per-second means (not raw samples) keep hand jerks from dominating; the
@@ -648,11 +622,9 @@ function spanHorizRms(pre, a, b) {
  * @param {number} cease - sample index where the train comes to rest
  *                         (end of data when no terminal stop was found)
  * @param {number} sampleRateHz
- * @param {boolean} anchored - true when `cease` is a genuine detected stop,
- *                             not just "end of data recorded so far"
- * @returns {Object} the approach_* feature block, plus boolean approach_anchored
+ * @returns {Object} the approach_* feature block
  */
-function approachFeatures(pre, cease, sampleRateHz, anchored = false) {
+function approachFeatures(pre, cease, sampleRateHz) {
   const f = getNullApproachFeatures();
   const hz = Math.max(1, Math.round(sampleRateHz));
   const end = Math.max(0, Math.min(cease, pre.n));
@@ -672,20 +644,16 @@ function approachFeatures(pre, cease, sampleRateHz, anchored = false) {
   f.approach_vert_rms_mid = spanVertRms(pre, Math.max(0, end - 2 * third), Math.max(0, end - third));
   f.approach_vert_rms_early = spanVertRms(pre, Math.max(0, end - 3 * third), Math.max(0, end - 2 * third));
 
-  // Per-second yaw/horizRms series over the last 20 s (the fork itself is
-  // well inside this) for the shape features.
+  // Per-second yaw series over the last 20 s (the fork itself is well inside
+  // this) for the shape features.
   const shapeSec = 20;
   const series = []; // [secondsBeforeRest (negative→0), yaw]
-  const horizSeries = []; // [secondsBeforeRest (negative→0), horizRms]
   for (let s = shapeSec; s >= 1; s--) {
     const a = end - s * hz;
     const b = end - (s - 1) * hz;
     if (a < 0) continue;
-    const t = -(s - 0.5);
     const y = spanYaw(pre, a, b);
-    if (y !== null) series.push([t, y]);
-    const h = spanHorizRms(pre, a, b);
-    if (h !== null) horizSeries.push([t, h]);
+    if (y !== null) series.push([-(s - 0.5), y]);
   }
   if (series.length >= 5) {
     // OLS slope of yaw vs time.
@@ -706,19 +674,10 @@ function approachFeatures(pre, cease, sampleRateHz, anchored = false) {
     f.approach_yaw_swing = series[maxI][1] - series[minI][1];
     f.approach_yaw_lead = series[Math.min(maxI, minI)][1];
   }
-  if (horizSeries.length >= 5) {
-    // Weighted-average time of the horizRms series — when braking effort
-    // is concentrated, not how much of it there is.
-    const wSum = horizSeries.reduce((s, [, h]) => s + h, 0);
-    if (wSum > 0) {
-      f.approach_braking_com = horizSeries.reduce((s, [t, h]) => s + t * h, 0) / wSum;
-    }
-  }
 
   for (const key in f) {
     if (!Number.isFinite(f[key])) f[key] = 0;
   }
-  f.approach_anchored = anchored;
   return f;
 }
 
@@ -735,7 +694,6 @@ function getNullApproachFeatures() {
     approach_vert_rms_early: 0,
     approach_vert_rms_mid: 0,
     approach_vert_rms_late: 0,
-    approach_braking_com: 0,
   };
 }
 

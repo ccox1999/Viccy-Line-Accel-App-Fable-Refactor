@@ -28,11 +28,6 @@
 
 "use strict";
 
-// Bump alongside sw.js's CACHE_VERSION on every deploy — this is the number
-// shown in the app header, so a glance at the running app tells you whether
-// it's caught up with the latest push (vs. serving a stale cached copy).
-const APP_VERSION = "28";
-
 // Dynamic imports for ML modules (loaded asynchronously to avoid blocking startup)
 let mlModules = null;
 async function loadMLModules() {
@@ -293,41 +288,35 @@ async function loadMLModules() {
   }
 
   /**
-   * Build the live classifier. Ships from buildPrimaryFeatureModel(), which
-   * uses two deliberately-chosen features (approach_yaw_trend, the S-bend
-   * swing-order measurement, and approach_braking_com, when braking effort
-   * concentrates) and a plain 2D nearest-centroid rule — see the
-   * PRIMARY_FEATURE_KEYS comment in classifier.js for why: the automatic
-   * 27-feature search (selectBestModel) is unstable at this sample size and
-   * scored 50% LOOCV, while these two features together score 83.3% LOOCV
-   * with a much tighter permutation p-value (0.013) than either alone.
-   * Falls back to selectBestModel automatically until there are 5+ trips of
-   * each side.
+   * Build the best classifier for the current training set. selectBestModel
+   * cross-validates an adaptive-k k-NN against logistic regression on the
+   * user's own data and returns whichever wins (k-NN by default, LR only when
+   * clearly better). The chosen model gates low-confidence calls at 60%.
    */
   async function buildClassifier() {
     const ml = await loadMLModules();
     const trainSet = await ensureTrainSet();
-    const sel = ml.classifier.buildPrimaryFeatureModel(trainSet.examples, 0.6);
+    const sel = ml.classifier.selectBestModel(trainSet.examples, 0.6);
     state.selectedModelName = sel.name;
     if (sel.accuracy != null) {
       console.log(
-        `[ML] model = ${sel.name}, top ${sel.featureCount} feature(s), ` +
-          `LOOCV ${(sel.accuracy * 100).toFixed(1)}%` +
-          (sel.baselineAccuracy != null
-            ? ` (all-feature k-NN baseline ${(sel.baselineAccuracy * 100).toFixed(0)}%)`
-            : "")
+        `[ML] model = ${sel.name}, top ${sel.featureCount} features, ` +
+          `CV ${(sel.accuracy * 100).toFixed(0)}% ` +
+          `(all-feature k-NN baseline ${(sel.baselineAccuracy * 100).toFixed(0)}%)`
       );
     }
     return sel.model;
   }
 
   /**
-   * Honest accuracy estimate for the model the app will actually use. See
-   * buildClassifier() — normally buildPrimaryFeatureModel()'s exact LOOCV,
-   * falling back to selectBestModel()'s repeated-split CV below 5/class.
+   * Honest accuracy estimate: average held-out accuracy over several random
+   * splits (single-split CV is too noisy on tiny sets). Returns null until
+   * there are enough examples of each class for the estimate to mean anything.
    */
   function estimateAccuracy(ml, examples) {
-    const sel = ml.classifier.buildPrimaryFeatureModel(examples, 0.6);
+    // Honest accuracy of the model the app will actually use: selectBestModel
+    // cross-validates both candidates and reports the winner's accuracy.
+    const sel = ml.classifier.selectBestModel(examples, 0.6);
     return sel.accuracy ?? null;
   }
 
@@ -571,21 +560,6 @@ async function loadMLModules() {
         state.classifierBuiltFor = state.trainSet.count();
       }
 
-      // The yaw+braking-centroid model reads a ROLLING trailing-20s window
-      // (see extractForkFeatures / approachFeatures) that has no idea how
-      // much of the trip is left — before the train genuinely starts
-      // decelerating into Brixton, that window is just ordinary mid-journey
-      // noise, and it could coincidentally resemble a trained class closely
-      // enough to show a confident but meaningless percentage. approach_anchored
-      // is true only once a real dwell/short-stop/end-of-braking tier has
-      // actually fired (genuine evidence of arrival, not just elapsed time),
-      // so hold the podium at "waiting" until then rather than trust the
-      // model on data it was never validated against.
-      if (state.selectedModelName === "yaw+braking-centroid" && !features.approach_anchored) {
-        ui.forecastNote.textContent = "Waiting for final approach…";
-        return;
-      }
-
       // Continuous (distance-weighted) probability — smooth, not quantised to
       // k discrete votes, so the live percentage actually moves second to
       // second instead of jumping in 20-point steps.
@@ -598,9 +572,7 @@ async function loadMLModules() {
       updateForecastPodium(leftPct, rightPct);
 
       ui.forecastNote.textContent =
-        state.selectedModelName === "yaw+braking-centroid"
-          ? "based on yaw-swing + braking timing"
-          : state.selectedModelName === "logreg"
+        state.selectedModelName === "logreg"
           ? "logistic-regression estimate"
           : `based on ${proba.neighbors.length} nearest trips`;
     } catch (err) {
@@ -1469,9 +1441,6 @@ async function loadMLModules() {
   }
 
   async function init() {
-    const versionEl = document.getElementById("appVersion");
-    if (versionEl) versionEl.textContent = `v${APP_VERSION}`;
-
     if (typeof DeviceMotionEvent === "undefined") {
       setPill("denied", "Motion sensors: not supported here");
       ui.sensorBtn.disabled = true;
