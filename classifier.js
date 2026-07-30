@@ -124,15 +124,13 @@ export class KNNClassifier {
     // 1. Find k nearest neighbors
     const neighbors = this.findNearestNeighbors(features, this.k);
 
-    // 2. Majority vote
+    // 2. Majority vote, corrected for training-set class imbalance (see
+    // _priorCorrect doc comment below).
     const votes = { left: 0, right: 0 };
     for (const neighbor of neighbors) {
       votes[neighbor.label]++;
     }
-
-    // 3. Determine winner and confidence
-    const leftVotes = votes.left;
-    const rightVotes = votes.right;
+    const { left: leftVotes, right: rightVotes } = this._priorCorrect(votes);
     const totalVotes = leftVotes + rightVotes;
 
     let label, confidence;
@@ -144,12 +142,11 @@ export class KNNClassifier {
       confidence = rightVotes / totalVotes;
     } else {
       // Tie: use distance-weighted vote (closer neighbors have higher weight)
-      const leftDist = sum(
-        neighbors.filter(n => n.label === "left").map(n => 1 / (1 + n.distance))
-      );
-      const rightDist = sum(
-        neighbors.filter(n => n.label === "right").map(n => 1 / (1 + n.distance))
-      );
+      const rawDist = {
+        left: sum(neighbors.filter(n => n.label === "left").map(n => 1 / (1 + n.distance))),
+        right: sum(neighbors.filter(n => n.label === "right").map(n => 1 / (1 + n.distance))),
+      };
+      const { left: leftDist, right: rightDist } = this._priorCorrect(rawDist);
       label = leftDist > rightDist ? "left" : "right";
       confidence = Math.max(leftDist, rightDist) / (leftDist + rightDist || 1);
     }
@@ -201,17 +198,40 @@ export class KNNClassifier {
     const median = sorted[Math.floor(sorted.length / 2)] || 0;
     const bw = median > 1e-6 ? median : 1;
 
-    let wLeft = 0;
-    let wRight = 0;
+    const rawW = { left: 0, right: 0 };
     for (const nb of neighbors) {
       const w = Math.exp(-(nb.distance * nb.distance) / (2 * bw * bw));
-      if (nb.label === "left") wLeft += w;
-      else if (nb.label === "right") wRight += w;
+      if (nb.label === "left") rawW.left += w;
+      else if (nb.label === "right") rawW.right += w;
     }
+    const { left: wLeft, right: wRight } = this._priorCorrect(rawW);
 
     const total = wLeft + wRight;
     if (total <= 0) return { pLeft: 0.5, pRight: 0.5, neighbors };
     return { pLeft: wLeft / total, pRight: wRight / total, neighbors };
+  }
+
+  /**
+   * Correct a raw per-class vote/weight sum for training-set class imbalance.
+   *
+   * Pooled k-NN implicitly assumes the deployment class prior matches the
+   * training sample's class ratio: in a region of feature space with no real
+   * signal, the majority-in-training class simply has more points nearby, so
+   * it wins by density alone. Here the true deployment prior is known (the
+   * Brixton fork is a physical 50/50 split, not something to estimate from
+   * this sample), so each class's raw weight is divided by its training
+   * count — recovering an estimate of the class-conditional likelihood,
+   * independent of how many examples of that class happen to be logged so
+   * far. Comparing likelihoods directly is equivalent to assuming equal
+   * (50/50) priors. With no signal this converges to ~50/50 regardless of
+   * class imbalance; with real signal it is unaffected in direction, only
+   * rescaled.
+   */
+  _priorCorrect(raw) {
+    const counts = this.countByLabel();
+    const left = counts.left > 0 ? raw.left / counts.left : 0;
+    const right = counts.right > 0 ? raw.right / counts.right : 0;
+    return { left, right };
   }
 
   /**
@@ -497,12 +517,22 @@ export class LogisticRegression {
       this.b -= this.lr * (gb / n);
     }
 
+    // Prior correction: with no signal, MLE's intercept converges toward
+    // log(n_left/n_right) — the training sample's class ratio — rather than
+    // 0. The true deployment prior is known to be 50/50 (a physical fork
+    // split, not something to estimate from this sample), so that leaked
+    // training-ratio offset is subtracted back out here. See KNNClassifier
+    // ._priorCorrect for the same correction applied to k-NN.
+    const counts = this.countByLabel();
+    this._priorOffset =
+      counts.left > 0 && counts.right > 0 ? Math.log(counts.left / counts.right) : 0;
+
     this._trained = true;
   }
 
   _probLeft(features) {
     this._ensureTrained();
-    let z = this.b;
+    let z = this.b - this._priorOffset;
     for (const k of this.keys) {
       const raw = Number.isFinite(features[k]) ? features[k] : this.mean[k];
       z += this.w[k] * ((raw - this.mean[k]) / this.std[k]);
@@ -552,6 +582,215 @@ export function adaptiveK(n) {
   let k = Math.round(Math.sqrt(Math.max(1, n)));
   if (k % 2 === 0) k += 1;
   return Math.max(3, Math.min(15, Math.min(k, Math.max(1, n))));
+}
+
+/**
+ * The features this app currently ships live predictions from:
+ *  - approach_yaw_trend: OLS slope of world-frame yaw over the last 20 s of
+ *    approach (features.js — "S ridden left-first has rising yaw; ridden
+ *    right-first, falling"). Purpose-built for the S-bend swing-order
+ *    hypothesis, not found by scanning the full orientation-invariant set.
+ *  - approach_braking_com: weighted-average timing of horizontal-accel RMS
+ *    over the same window — WHEN braking effort concentrates, a mechanism
+ *    independent of yaw (the two fork routes cover slightly different
+ *    remaining distance to the platform). Found by inspecting horizRms
+ *    shapes across trips, not a scan-derived pick either.
+ *
+ * At n=12 (7 left / 5 right, 2026-07-28 dataset) selectBestModel's automatic
+ * search over all ~27 features was unstable — re-ranking features from
+ * scratch inside each of only 11 training points per fold — and came back at
+ * 50% LOOCV (6/12), permutation p=0.443 (indistinguishable from chance).
+ * approach_yaw_trend alone, nearest-centroid, no feature search: 83.3% LOOCV
+ * (10/12), permutation p=0.049. approach_braking_com alone: 75% LOOCV,
+ * p=0.20 — weaker alone, but its errors don't overlap with yaw_trend's.
+ * Combined (2D nearest-centroid, z-scored per fold): 83.3% LOOCV (10/12),
+ * permutation p=0.013 — same accuracy as yaw_trend alone but a tighter
+ * p-value, from two independent mechanisms rather than one. A real lead
+ * worth shipping and re-validating as more trips arrive — not proof.
+ */
+export const PRIMARY_FEATURE_KEYS = ["approach_yaw_trend", "approach_braking_com"];
+
+/**
+ * Nearest-centroid classifier over a small, named, z-scored feature set.
+ * Deliberately simple — no per-fold feature search, no distance-weighted
+ * neighbours — just "is this point closer to the left group's centroid or
+ * the right group's", with a diagonal Gaussian likelihood ratio for a smooth
+ * (non-quantised) live probability instead of a hard vote.
+ *
+ * Z-scoring uses ALL training examples' mean/stdDev per feature (computed
+ * once, cached) so the two features' very different natural scales (yaw
+ * trend ~0.01-0.1, braking timing ~7-10) don't let one dominate distance.
+ *
+ * Exposes the same interface subset the app actually calls (addTrainingExample
+ * / predict / predictProbability / count) so it drops into buildClassifier()
+ * in place of a selectBestModel() result.
+ */
+export class MultiFeatureCentroidClassifier {
+  constructor(featureKeys) {
+    this.featureKeys = featureKeys;
+    this.examples = []; // [{values: number[], label}]
+    this._statsCache = null;
+  }
+
+  addTrainingExample(features, label) {
+    if (!["left", "right"].includes(label)) {
+      throw new Error(`Invalid label: ${label}. Must be "left" or "right".`);
+    }
+    const values = this.featureKeys.map((k) => features?.[k]);
+    if (!values.every(Number.isFinite)) return; // older feature version missing a key
+    this.examples.push({ values, label });
+    this._statsCache = null;
+  }
+
+  count() {
+    return this.examples.length;
+  }
+
+  _stats() {
+    if (this._statsCache) return this._statsCache;
+    const nDim = this.featureKeys.length;
+    const meanOf = (a) => a.reduce((s, x) => s + x, 0) / a.length;
+    const stdOf = (a, m) => Math.max(1e-6, Math.sqrt(a.reduce((s, x) => s + (x - m) * (x - m), 0) / a.length));
+
+    const keyMean = [], keyStd = [];
+    for (let d = 0; d < nDim; d++) {
+      const col = this.examples.map((e) => e.values[d]);
+      const m = meanOf(col);
+      keyMean.push(m);
+      keyStd.push(stdOf(col, m));
+    }
+    const z = (values) => values.map((v, d) => (v - keyMean[d]) / keyStd[d]);
+    const zExamples = this.examples.map((e) => ({ z: z(e.values), label: e.label }));
+
+    const centroidOf = (label) => {
+      const pts = zExamples.filter((e) => e.label === label).map((e) => e.z);
+      const c = [];
+      for (let d = 0; d < nDim; d++) c.push(meanOf(pts.map((p) => p[d])));
+      return c;
+    };
+    const stdOfClass = (label, centroid) => {
+      const pts = zExamples.filter((e) => e.label === label).map((e) => e.z);
+      const s = [];
+      for (let d = 0; d < nDim; d++) s.push(stdOf(pts.map((p) => p[d]), centroid[d]));
+      return s;
+    };
+    const leftCentroid = centroidOf("left");
+    const rightCentroid = centroidOf("right");
+
+    this._statsCache = {
+      keyMean,
+      keyStd,
+      z,
+      leftCentroid,
+      rightCentroid,
+      leftStd: stdOfClass("left", leftCentroid),
+      rightStd: stdOfClass("right", rightCentroid),
+    };
+    return this._statsCache;
+  }
+
+  _dist(a, b) {
+    let sumSq = 0;
+    for (let d = 0; d < a.length; d++) sumSq += (a[d] - b[d]) * (a[d] - b[d]);
+    return Math.sqrt(sumSq);
+  }
+
+  predict(features) {
+    const values = this.featureKeys.map((k) => features?.[k]);
+    if (!values.every(Number.isFinite) || this.examples.length === 0) {
+      return { label: null, confidence: 0, error: "No usable feature values" };
+    }
+    const { z, leftCentroid, rightCentroid } = this._stats();
+    const zv = z(values);
+    const dLeft = this._dist(zv, leftCentroid);
+    const dRight = this._dist(zv, rightCentroid);
+    const label = dLeft < dRight ? "left" : "right";
+    const confidence = Math.max(dLeft, dRight) / (dLeft + dRight || 1);
+    return { label, confidence, values };
+  }
+
+  /**
+   * Smooth probability via a diagonal-covariance Gaussian likelihood ratio
+   * per class, equal priors (the Brixton fork is a physical 50/50 split,
+   * not something to estimate from a small labelled sample — same reasoning
+   * as KNNClassifier's _priorCorrect).
+   */
+  predictProbability(features) {
+    const values = this.featureKeys.map((k) => features?.[k]);
+    if (!values.every(Number.isFinite) || this.examples.length === 0) {
+      return { pLeft: 0.5, pRight: 0.5, neighbors: [], error: "No usable feature values" };
+    }
+    const { z, leftCentroid, rightCentroid, leftStd, rightStd } = this._stats();
+    const zv = z(values);
+    const gaussProduct = (point, centroid, std) => {
+      let p = 1;
+      for (let d = 0; d < point.length; d++) {
+        const sd = std[d];
+        p *= Math.exp(-((point[d] - centroid[d]) * (point[d] - centroid[d])) / (2 * sd * sd)) / sd;
+      }
+      return p;
+    };
+    const wLeft = gaussProduct(zv, leftCentroid, leftStd);
+    const wRight = gaussProduct(zv, rightCentroid, rightStd);
+    const total = wLeft + wRight;
+    if (total <= 0) return { pLeft: 0.5, pRight: 0.5, neighbors: this.examples };
+    return { pLeft: wLeft / total, pRight: wRight / total, neighbors: this.examples };
+  }
+
+  toJSON() {
+    return { featureKeys: this.featureKeys, examples: this.examples };
+  }
+  static fromJSON(json) {
+    const clf = new MultiFeatureCentroidClassifier(json.featureKeys);
+    clf.examples = json.examples || [];
+    return clf;
+  }
+}
+
+/**
+ * Build the live classifier from PRIMARY_FEATURE_KEYS, plus an honest exact
+ * LOOCV accuracy estimate (only n folds — trivial at this sample size).
+ * Falls back to the general-purpose selectBestModel() search when there
+ * isn't yet enough data of each class for a centroid to mean anything (same
+ * 5-per-class bar the rest of the pipeline uses).
+ *
+ * @returns {{ model, name, accuracy, featureCount, baselineAccuracy }}
+ */
+export function buildPrimaryFeatureModel(examples, minConfidence = 0.6) {
+  const usable = (examples || []).filter(
+    (e) =>
+      e.features &&
+      typeof e.features === "object" &&
+      PRIMARY_FEATURE_KEYS.every((k) => Number.isFinite(e.features[k])) &&
+      (e.label === "left" || e.label === "right")
+  );
+  const counts = { left: 0, right: 0 };
+  for (const e of usable) counts[e.label]++;
+
+  if (counts.left < 5 || counts.right < 5) {
+    return selectBestModel(examples, minConfidence);
+  }
+
+  let correct = 0;
+  for (let i = 0; i < usable.length; i++) {
+    const probe = new MultiFeatureCentroidClassifier(PRIMARY_FEATURE_KEYS);
+    for (let j = 0; j < usable.length; j++) {
+      if (j !== i) probe.addTrainingExample(usable[j].features, usable[j].label);
+    }
+    if (probe.predict(usable[i].features).label === usable[i].label) correct++;
+  }
+  const accuracy = correct / usable.length;
+
+  const model = new MultiFeatureCentroidClassifier(PRIMARY_FEATURE_KEYS);
+  for (const e of usable) model.addTrainingExample(e.features, e.label);
+
+  return {
+    model,
+    name: "yaw+braking-centroid",
+    accuracy,
+    featureCount: PRIMARY_FEATURE_KEYS.length,
+    baselineAccuracy: null,
+  };
 }
 
 /**

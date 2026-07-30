@@ -87,6 +87,14 @@ body {
   color: var(--text-muted);
 }
 
+.app-version {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
 /* Cards */
 
 .card {
