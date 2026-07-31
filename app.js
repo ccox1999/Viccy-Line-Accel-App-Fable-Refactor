@@ -1241,7 +1241,6 @@ async function loadMLModules() {
       // Browsers without requestPermission (Android, desktop) need no prompt.
 
       setPill("granted", "Sensors ready");
-      ui.sensorBtn.hidden = true;   // frees a whole row for the charts
       setSessionState("Ready");
       ui.recordBtn.disabled = false;
       // Collapse the enable button once granted — it's done its job and the

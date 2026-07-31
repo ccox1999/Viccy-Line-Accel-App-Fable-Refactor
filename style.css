@@ -65,15 +65,6 @@ body {
 .app-shell {
   max-width: 480px;
   margin: 0 auto;
-  /* One screen, no page scroll: the prediction and the charts are the point,
-     so they get the space and everything else is sized to fit around them.
-     dvh (not vh) so iOS Safari's collapsing URL bar can't clip the layout. */
-  height: 100vh;
-  height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  overflow: hidden;
   padding: 10px 14px;
   padding-top: max(8px, env(safe-area-inset-top));
   padding-right: max(14px, env(safe-area-inset-right));
@@ -81,12 +72,30 @@ body {
   padding-left: max(14px, env(safe-area-inset-left));
 }
 
+/* .app-main is the first screen: it fills the viewport exactly so the charts
+   and controls are reachable without scrolling. Anything AFTER it (recordings
+   history) deliberately starts below the fold. min-height, not height, so the
+   page can still grow if a phone is unusually short.
+   dvh (not vh) so iOS Safari's collapsing URL bar can't clip it. */
+.app-main {
+  min-height: calc(100vh - 20px);
+  min-height: calc(100dvh - 20px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Visual order != DOM order: the forecast sits high (prime real estate), the
-   charts take whatever is left, and the controls sit low where the thumb is. */
+   charts take whatever is left, and the controls sit low where the thumb is.
+   Every .app-main child MUST have an order — a child without one defaults to
+   0 and silently jumps to the top. */
 .app-header    { order: 1; flex: none; }
 .forecast-card { order: 2; flex: none; }
-.chart-card    { order: 3; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.chart-card    { order: 3; flex: 1 1 0; min-height: 90px; display: flex; flex-direction: column; }
 .controls-card { order: 4; flex: none; }
+
+/* Recordings history lives outside .app-main, below the first screen. */
+.history-card { margin-top: 10px; }
 
 /* Header */
 

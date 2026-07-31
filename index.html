@@ -52,13 +52,14 @@
   </noscript>
 
   <div class="app-shell">
+    <div class="app-main">
 
     <header class="app-header">
       <h1>Victoria Line</h1>
       <p class="subtitle">Stockwell → Brixton</p>
     </header>
 
-    <section id="liveForcastCard" class="card forecast-card" aria-label="Live platform forecast">
+    <section id="liveForcastCard" class="card forecast-card hidden" aria-label="Live platform forecast">
       <!-- Each row is a fixed direction; the rank-top / rank-bottom classes
            slide them past each other (podium swap) when the lead changes. -->
       <div class="forecast-podium" role="list" aria-label="Live direction estimate">
@@ -273,6 +274,8 @@
     </section>
 
     <!-- Recordings History (kept at the bottom, out of the record→watch flow) -->
+    </div><!-- /.app-main -->
+
     <section class="card history-card hidden" aria-label="Recordings history">
       <div class="history-header">
         <h2 class="history-title">📋 Recordings History</h2>
