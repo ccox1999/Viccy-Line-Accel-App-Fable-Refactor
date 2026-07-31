@@ -972,7 +972,16 @@ async function loadMLModules() {
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
 
-    for (let value = chart.yMin; value <= chart.yMax + 1e-9; value += chart.step) {
+    // Gridline density follows the height the layout actually gave us. The
+    // charts now flex to fill the screen, so a short chart would otherwise
+    // stack 10px labels on top of each other (the rotation chart's ±360°/s at
+    // 90° steps needs 9 rows and only fits when it's tall).
+    // 24px per label: 10px text needs real breathing room, and the rotation
+    // chart's 9 rows at ±360°/s crowd badly below that.
+    let step = chart.step;
+    while ((range / step) * 24 > height && range / step > 2) step *= 2;
+
+    for (let value = chart.yMin; value <= chart.yMax + 1e-9; value += step) {
       const y = crisp(toY(value));
 
       ctx.beginPath();
@@ -1214,7 +1223,7 @@ async function loadMLModules() {
   ui.sensorBtn.addEventListener("click", async () => {
     try {
       if (typeof DeviceMotionEvent === "undefined") {
-        setPill("denied", "Motion sensors: not supported in this browser");
+        setPill("denied", "Sensors unsupported");
         setSessionState("Open this page on a phone");
         return;
       }
@@ -1223,7 +1232,7 @@ async function loadMLModules() {
       if (typeof DeviceMotionEvent.requestPermission === "function") {
         const response = await DeviceMotionEvent.requestPermission();
         if (response !== "granted") {
-          setPill("denied", "Motion permission: denied");
+          setPill("denied", "Permission denied");
           // iOS remembers the denial — explain how to get re-prompted.
           setSessionState("Denied \u2014 quit Safari and reopen to be asked again");
           return;
@@ -1231,7 +1240,8 @@ async function loadMLModules() {
       }
       // Browsers without requestPermission (Android, desktop) need no prompt.
 
-      setPill("granted", "Motion permission: granted");
+      setPill("granted", "Sensors ready");
+      ui.sensorBtn.hidden = true;   // frees a whole row for the charts
       setSessionState("Ready");
       ui.recordBtn.disabled = false;
       // Collapse the enable button once granted — it's done its job and the
@@ -1240,7 +1250,7 @@ async function loadMLModules() {
       hapticTick(10);
     } catch (err) {
       console.error("[MotionLab] Motion permission request failed:", err);
-      setPill("denied", "Motion permission: error");
+      setPill("denied", "Permission error");
       setSessionState(
         err?.name === "NotAllowedError"
           ? "The tap must come directly from you \u2014 try again"
@@ -1551,12 +1561,12 @@ async function loadMLModules() {
 
   async function init() {
     if (typeof DeviceMotionEvent === "undefined") {
-      setPill("denied", "Motion sensors: not supported here");
+      setPill("denied", "Sensors unsupported");
       ui.sensorBtn.disabled = true;
       setSessionState("Open this page on a phone");
     } else if (!window.isSecureContext) {
       // The permission API silently fails over plain HTTP — say so up front.
-      setPill("denied", "HTTPS required for motion sensors");
+      setPill("denied", "HTTPS required");
       ui.sensorBtn.disabled = true;
       setSessionState("Serve this page over HTTPS");
     }
