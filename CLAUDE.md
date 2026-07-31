@@ -1,5 +1,40 @@
 # Victoria Line Motion Lab — Project Context
 
+## Current state (2026-07-31) — fork-engine.js is now the live prediction path
+
+Analysis of `victoria-training-2026-07-31-9L6R.json` (15 trips, 9L/6R, full raw) found a **physics-derived rule that beats the learned pipeline**, and it is now wired in as the primary live engine ([fork-engine.js](fork-engine.js), FORK_ENGINE_VERSION 1). FEATURE_VERSION is **untouched** — no re-extraction, the kNN/logreg path is intact and still runs as the fallback when the engine has no verdict.
+
+**Signal.** Signed yaw (rotation vector projected onto gravity — orientation-invariant, hard requirement satisfied) integrated over a bounded window before arrival. LOOCV, threshold refit per fold: `[arr-26, arr-10]` AUC 0.98 (final call), `[arr-22, arr-16]` AUC 0.91 (pre-visibility). The S-bend cancellation documented on 2026-07-09 is REAL and is exactly why the window is bounded — widen it to `[arr-34, arr-4]` and AUC collapses to 0.67. Separation does **not** invert under ±4 s of window shift, so this is not a single-S-lobe artefact.
+
+**Why it can beat the passenger's own eyes.** The train must cross the points to reach its platform and the points are upstream of the platform mouth, so the deciding evidence is necessarily recorded before the platform is visible. Backward-integrated braking profiles put the middle carriage at the tunnel mouth ~16 s before the stop (65 m to go, 10-12 m/s).
+
+**Triggering — the part that was actually hard.** Sensors cannot distinguish the final approach from an intermediate stop or a Brixton pre-platform hold (the 2026-07-22 finding). The fix is a **route prior**, not a signal heuristic: the user's protocol is Stockwell departure -> Brixton arrival, nothing outside. Over 15 trips the fastest journey is **93.1 s** and every mid-journey stop began between **37 s and 94 s**, so a stop starting before `MIN_JOURNEY` (85 s) is never the arrival — that one rule rejects 13/14 mid-journey stops with certainty. `AUTO_ARM_AT` (75 s) then makes the braking detector sensitive for the real approach. Dead reckoning was tried as an alternative anchor and **failed** (58-753 m estimated for a ~1.4 km route): a hand-held phone has no heading reference without a magnetometer. Elapsed time is drift-free.
+
+**Measured, LOOCV with sign+threshold+scale refit per fold, streaming through the shipped JS:**
+
+| when | correct |
+|---|---|
+| 22 s before arrival | 11/15 (73%) |
+| 20 s before arrival | 12/15 (80%) |
+| 18 s before arrival | 13/15 (87%) |
+| 16 s before arrival (platform visible) | 13/15 (87%) |
+| final call on Stop | 13/15 (87%) |
+
+Base rate (always-left) is 9/15 = 60%.
+
+**Architecture notes.**
+- `finalVerdict()` is the authoritative answer and is only called once the user taps Stop, because it trusts the recording's endpoint as the arrival instant. The live path genuinely cannot know it has arrived — the same live/complete split `recordingComplete` already encodes. An earlier version tried to detect arrival live via sustained quiet and **fired on 0/15 trips**, because the user stops within ~1 s of the halt so a dwell never exists (the 2026-07-19 lesson, rediscovered).
+- `calibrate()` derives sign/threshold from the user's OWN labelled trips. gx/gy/gz sign conventions differ per platform, so a hard-coded sign could silently invert every prediction on a new device. Runs off the hot path (`refreshForkCalibration()` at init and after each label) because it reads every raw recording out of IndexedDB.
+- `yawIntegral` binary-searches its start index; it runs ~1x/s against a buffer that grows to ~9000 samples. Only the last sample of each batch computes the verdict.
+
+**Known limitations (do not paper over).**
+- The live reading flips several times per approach and is poor in the last few seconds, where the trailing window has passed the fork into a dead zone. An "evidence floor" that held the last informative reading halved the flipping but cost real accuracy earlier (18 s out 87%->73%, 20 s out 80%->60%), so it was **rejected** — earliness is the point. The note text marks the live reading provisional.
+- `MIN_JOURNEY`/`AUTO_ARM_AT` are route- and habit-specific (Stockwell->Brixton, this boarding protocol). They are wrong for any other journey and there is no runtime check that the user is on that route.
+- Selection-corrected permutation for the pre-visibility window is p=0.057 at n=15 — a real effect, borderline significance. Constants are fitted on all 15 trips; only the per-fold threshold is honest-by-construction.
+- Learned models were tested on the same pre-visibility window (logistic L1/L2, LDA, MLP 8 and 32x16, random forest, each fitted inside LOOCV): best 0.73, all below the single physical feature's 0.87, none significant. Don't reach for a NN at this n.
+
+---
+
 ## Current state (2026-07-22) — MAJOR: anchor was landing on Brixton's pre-platform hold, not the true arrival
 
 At n=9 (6L/3R, `Wednesday_vibrations_2.json` uploaded by the user, not in-repo), investigating the user's "how does it handle mid-journey stops" question found the v5 anchor was systematically wrong: on **5 of 9 real trips**, it locked onto a stop ~75-95s in, followed by **30-70+ seconds of further genuine train motion** that never settled before the recording ended (confirmed: NOT walking, user always stops recording at the true halt). User confirmed the physical mechanism: Brixton, a busy terminus, sometimes makes the train wait for the platform to clear before its final approach — the anchor was catching that wait, not the arrival, meaning the fork window had been sampling the wrong segment of the journey on more than half the "dwell"-type trips.

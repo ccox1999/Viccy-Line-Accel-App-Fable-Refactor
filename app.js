@@ -32,13 +32,14 @@
 let mlModules = null;
 async function loadMLModules() {
   if (mlModules) return mlModules;
-  const [features, classifier, trainingSet, rawStore] = await Promise.all([
+  const [features, classifier, trainingSet, rawStore, forkEngine] = await Promise.all([
     import("./features.js"),
     import("./classifier.js"),
     import("./training-set.js"),
     import("./raw-store.js"),
+    import("./fork-engine.js"),
   ]);
-  mlModules = { features, classifier, trainingSet, rawStore };
+  mlModules = { features, classifier, trainingSet, rawStore, forkEngine };
   return mlModules;
 }
 
@@ -159,6 +160,9 @@ async function loadMLModules() {
     classifierBuiltFor: -1,   // trainSet.count() the cached classifier was built from
     lastPredictionAt: 0,      // timestamp of last live prediction (Phase 2)
     lastLivePrediction: null, // { label, confidence, neighbors } from Phase 2
+    forkEngine: null,         // ForkEngine instance for this recording
+    forkCal: null,            // calibration derived from the user's own trips
+    forkFedUpTo: 0,           // samples already pushed through forkEngine
     lastDisplayedLeader: null,// which direction was on top last time (for podium animation)
     selectedModelName: null,  // "knn" | "logreg" — chosen by cross-validation
   };
@@ -268,6 +272,9 @@ async function loadMLModules() {
       ml.rawStore.requestPersistence();
       state.trainSet = new ml.trainingSet.TrainingSet();
       await state.trainSet.load();
+      // Derive the fork engine's device-specific sign/threshold once at
+      // startup, off the recording hot path. Fire-and-forget.
+      refreshForkCalibration();
       // Bring any examples saved by an older feature extractor up to the
       // current definition (fork-localised windows + approach shape),
       // re-extracting from their stored raw motion data so the whole set is
@@ -534,16 +541,90 @@ async function loadMLModules() {
   }
 
   /**
+   * Derive the fork engine's sign/threshold from the user's OWN labelled
+   * trips. gx/gy/gz sign conventions differ between devices (see the comment
+   * in handleMotion), so a hard-coded sign fitted on one phone could silently
+   * invert every prediction on another. Deriving it from stored labels makes
+   * that failure impossible, and lets the engine sharpen as trips accumulate.
+   *
+   * Runs off the hot path (app init, and after each label) because it reads
+   * every raw recording out of IndexedDB. Falls back to shipped defaults.
+   */
+  async function refreshForkCalibration() {
+    try {
+      if (!state.trainSet || state.trainSet.count() < 6) return;
+      const ml = await loadMLModules();
+      const examples = [];
+      for (const ex of state.trainSet.examples || []) {
+        if (!ex || !ex.label) continue;
+        const raw = await state.trainSet.getRawMotionData(ex.id);
+        if (raw && raw.length) examples.push({ label: ex.label, rawMotionData: raw });
+      }
+      if (examples.length < 6) return;
+      const cal = ml.forkEngine.calibrate(examples);
+      // Only adopt a calibration that actually separates the classes; a
+      // degenerate one would be worse than the shipped defaults.
+      if (cal && cal.separation > 0.5) {
+        state.forkCal = cal;
+        console.info("[fork] calibrated from", cal.n, "trips; sign", cal.sign,
+                     "separation", cal.separation.toFixed(2));
+      }
+    } catch (err) {
+      console.warn("[fork] calibration skipped:", err);
+    }
+  }
+
+  /**
    * Phase 2: Make a live prediction from the most fork-like window seen so far
    * (see extractForkFeatures). Called every 1 second during recording
    * (throttled by renderFrame).
    */
   async function makeLivePrediction() {
-    if (!state.trainSet || state.trainSet.count() < 5) return;
     if (state.data.length < 30) return; // need at least 0.5s of data
 
     try {
       const ml = await loadMLModules();
+
+      // ---- Fork engine (primary): a physics-derived rule, not a search.
+      // Unlike the kNN path it needs no training examples to produce an
+      // answer, so it also works on a fresh install. See fork-engine.js.
+      if (!state.forkEngine) {
+        // state.forkCal is computed off the hot path by refreshForkCalibration()
+        // (raw data lives in IndexedDB; pulling it mid-recording would stall
+        // the sensor thread). Null just means "use the shipped defaults".
+        state.forkEngine = new ml.forkEngine.ForkEngine(state.forkCal);
+        state.forkFedUpTo = 0;
+      }
+      // Feed only the new samples: the engine is a streaming state machine.
+      // Only the last sample computes the (O(window)) verdict — the rest just
+      // advance the state machine, so this stays cheap on the sensor thread.
+      let forkOut = null;
+      const last = state.data.length - 1;
+      for (let i = state.forkFedUpTo; i < state.data.length; i++) {
+        const out = state.forkEngine.update(state.data[i], state.data, i === last);
+        if (out) forkOut = out;
+      }
+      state.forkFedUpTo = state.data.length;
+
+      if (forkOut && forkOut.phase !== "waiting") {
+        state.lastLivePrediction = {
+          pLeft: forkOut.pLeft, pRight: forkOut.pRight, source: "fork-engine",
+        };
+        updateForecastPodium(forkOut.pLeft * 100, forkOut.pRight * 100);
+        ui.forecastNote.textContent =
+          forkOut.phase === "final"
+            ? "arrival detected — fork reading"
+            : "approach — provisional fork reading";
+        return;
+      }
+      // Before the route prior arms (first ~75 s) there is no fork evidence
+      // yet; show the waiting state rather than a meaningless number.
+      if (forkOut && forkOut.phase === "waiting") {
+        ui.forecastNote.textContent = "waiting for the approach…";
+        return;
+      }
+
+      if (!state.trainSet || state.trainSet.count() < 5) return;
 
       // Extract features from the most fork-like window found in the trip SO
       // FAR — the same function (and therefore the same feature distribution)
@@ -1189,6 +1270,11 @@ async function loadMLModules() {
     // where the training set changed but its size didn't (e.g. delete one,
     // add one, or re-seed test data) since the last live forecast.
     state.classifierBuiltFor = -1;
+    // Fork engine is per-trip: its state machine (arming, arrival) is causal.
+    // forkCal is NOT reset — it is a device-level calibration, refreshed off
+    // the hot path by refreshForkCalibration().
+    state.forkEngine = null;
+    state.forkFedUpTo = 0;
 
     // Attach only while recording: a permanently-attached devicemotion
     // listener keeps iOS sensors powered and drains the battery even idle.
@@ -1246,10 +1332,31 @@ async function loadMLModules() {
     ui.recordBtn.title = "Start recording";
     ui.sessionState.classList.remove("recording");
 
-    // Hide live forecast card (Phase 2)
-    ui.liveForcastCard.classList.add("hidden");
-
     const hasData = state.data.length > 0;
+
+    // Authoritative verdict: now that the user has tapped Stop, the recording's
+    // own endpoint IS the arrival (their protocol is to stop within ~1 s of the
+    // train halting), so the fork window can be anchored exactly. A live
+    // recording cannot know this — the same live/complete split the feature
+    // extractor's `recordingComplete` flag encodes.
+    let finalShown = false;
+    if (hasData) {
+      try {
+        const ml = await loadMLModules();
+        const fv = ml.forkEngine.finalVerdict(state.data, state.forkCal);
+        if (fv) {
+          updateForecastPodium(fv.pLeft * 100, fv.pRight * 100);
+          ui.forecastNote.textContent = fv.shortJourney
+            ? "final reading (short trip — treat with caution)"
+            : "final reading, anchored on arrival";
+          finalShown = true;
+        }
+      } catch (err) {
+        console.warn("[fork] final verdict failed:", err);
+      }
+    }
+    if (!finalShown) ui.liveForcastCard.classList.add("hidden");
+
     setSessionState(hasData ? "Recorded" : "Idle");
     ui.clearBtn.disabled = !hasData;
 
@@ -1275,6 +1382,8 @@ async function loadMLModules() {
         const label = await showLabelingDialog();
         if (label && label !== "skip") {
           await labelAndSaveToTrainingSet(label);
+          // New labelled trip -> the fork engine can sharpen its calibration.
+          refreshForkCalibration();
         }
       }
     }
